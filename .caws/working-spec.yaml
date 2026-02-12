@@ -1,0 +1,40 @@
+scope: Deduper media deduplication tool
+version: "0.1.0"
+risk_tier: 2
+description: |
+  CLI-first + GUI tool for finding and removing duplicate media files
+  (photos, videos, audio). Uses perceptual hashing, BK-tree indexing,
+  and video frame fingerprinting for detection. Move-to-trash only,
+  never permanent deletion.
+
+acceptance_criteria:
+  - swift build succeeds with no warnings
+  - swift test passes with meaningful coverage of algorithms and services
+  - CLI scan command works end-to-end on real directories
+  - All file operations use move-to-trash, never permanent deletion
+  - Transaction logging enables undo of merge operations
+  - Protected system paths are never modified
+
+safety_invariants:
+  - Move-to-trash by default, never permanent deletion
+  - Transaction logging for all file operations with rollback
+  - Protected path detection (system folders)
+  - No modification of files outside user-selected directories
+
+architecture:
+  targets:
+    - name: DeduperKit
+      type: library
+      description: Core business logic, algorithms, services
+    - name: DeduperCLI
+      type: executable
+      description: Command-line interface using ArgumentParser
+    - name: DeduperUI
+      type: library
+      description: SwiftUI components (deferred)
+    - name: DeduperApp
+      type: executable
+      description: macOS SwiftUI application (deferred)
+  persistence: SwiftData
+  concurrency: Swift 6 strict concurrency
+  platform: macOS 14+
