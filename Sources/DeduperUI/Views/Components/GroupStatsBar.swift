@@ -8,6 +8,7 @@ public struct GroupStatsBar: View {
     public let reviewedCount: Int
     public let undecidedExactCount: Int
     public let approvedCount: Int
+    public let mergedCount: Int
     public let onBatchApproveExact: (() -> Void)?
     public let onMergeApproved: (() -> Void)?
 
@@ -20,6 +21,7 @@ public struct GroupStatsBar: View {
         reviewedCount: Int = 0,
         undecidedExactCount: Int = 0,
         approvedCount: Int = 0,
+        mergedCount: Int = 0,
         onBatchApproveExact: (() -> Void)? = nil,
         onMergeApproved: (() -> Void)? = nil
     ) {
@@ -29,6 +31,7 @@ public struct GroupStatsBar: View {
         self.reviewedCount = reviewedCount
         self.undecidedExactCount = undecidedExactCount
         self.approvedCount = approvedCount
+        self.mergedCount = mergedCount
         self.onBatchApproveExact = onBatchApproveExact
         self.onMergeApproved = onMergeApproved
     }
@@ -53,6 +56,15 @@ public struct GroupStatsBar: View {
                     systemImage: "checkmark.circle"
                 )
                 .font(.caption)
+            }
+
+            if mergedCount > 0 {
+                Label(
+                    "\(mergedCount) merged",
+                    systemImage: "archivebox.circle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.purple)
             }
 
             Spacer()

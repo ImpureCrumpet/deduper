@@ -327,7 +327,10 @@ public struct MergeSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Merge \(plan.totalFiles) Files") {
-                    viewModel.execute(plan: plan)
+                    viewModel.execute(
+                        plan: plan,
+                        container: modelContainer
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)

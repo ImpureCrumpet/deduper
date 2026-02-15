@@ -10,6 +10,7 @@ public enum DecisionState: Int16, Sendable, CaseIterable {
     case needsReview = 3
     case blocked = 4
     case notDuplicate = 5
+    case merged = 6
 
     public var displayName: String {
         switch self {
@@ -19,6 +20,7 @@ public enum DecisionState: Int16, Sendable, CaseIterable {
         case .needsReview: "Needs Review"
         case .blocked: "Blocked"
         case .notDuplicate: "Not Duplicate"
+        case .merged: "Merged"
         }
     }
 
@@ -30,6 +32,7 @@ public enum DecisionState: Int16, Sendable, CaseIterable {
         case .needsReview: "questionmark.circle"
         case .blocked: "exclamationmark.triangle"
         case .notDuplicate: "xmark.circle"
+        case .merged: "archivebox.circle.fill"
         }
     }
 
@@ -41,6 +44,7 @@ public enum DecisionState: Int16, Sendable, CaseIterable {
         case .needsReview: .yellow
         case .blocked: .red
         case .notDuplicate: .red
+        case .merged: .purple
         }
     }
 }

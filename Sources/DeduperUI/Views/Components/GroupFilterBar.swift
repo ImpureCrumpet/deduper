@@ -96,6 +96,11 @@ public struct GroupFilterBar: View {
                             DecisionState.notDuplicate
                                 as DecisionState?
                         )
+                    Text("Merged")
+                        .tag(
+                            DecisionState.merged
+                                as DecisionState?
+                        )
                 }
                 .pickerStyle(.menu)
                 .fixedSize()

@@ -277,6 +277,9 @@ public final class GroupDetailViewModel {
               let sessionId = currentSessionId
         else { return }
 
+        // Cannot override .merged state from UI — undo first.
+        if currentDecision == .merged { return }
+
         // Idempotency: don't re-save or re-advance if already in
         // the target state with no keeper change.
         if currentDecision == state && keeperPath == nil {

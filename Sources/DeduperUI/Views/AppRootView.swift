@@ -54,7 +54,9 @@ public struct AppRootView: View {
                 }
             }
             ToolbarItem(placement: .automatic) {
-                if let tx = mergeVM.lastTransaction {
+                if let tx = mergeVM.lastTransaction,
+                   mergeVM.lastMergedSessionId
+                       == sessionVM.selectedSessionId {
                     Button {
                         mergeVM.undoLastTransaction()
                     } label: {
@@ -66,6 +68,7 @@ public struct AppRootView: View {
                 }
             }
         }
+        .onAppear { configureMergeCallback() }
         .sheet(isPresented: $showMergeSheet, onDismiss: {
             mergeVM.reset()
         }) {
@@ -86,6 +89,24 @@ public struct AppRootView: View {
         return sessionVM.sessions.first {
             $0.sessionId == id
         }
+    }
+
+    @discardableResult
+    private func configureMergeCallback() -> Bool {
+        mergeVM.onDecisionsTransitioned = {
+            (groupIds: [UUID], targetState: DecisionState) in
+            for gid in groupIds {
+                groupVM.hydrateDecisionSnapshot(
+                    groupId: gid,
+                    snapshot: DecisionSnapshot(
+                        state: targetState,
+                        decidedAt: Date()
+                    )
+                )
+            }
+            groupVM.applyFilters()
+        }
+        return true
     }
 
     private func handleSessionChange(_ sessionId: UUID?) {

@@ -40,6 +40,7 @@ public struct GroupListView: View {
                 reviewedCount: viewModel.reviewedCount,
                 undecidedExactCount: viewModel.undecidedExactCount,
                 approvedCount: approvedCount,
+                mergedCount: mergedCount,
                 onBatchApproveExact: {
                     viewModel.batchApproveExactMatches(
                         context: modelContext
@@ -105,6 +106,12 @@ public struct GroupListView: View {
     private var approvedCount: Int {
         viewModel.decisionByGroupId.values.count {
             $0.state == .approved
+        }
+    }
+
+    private var mergedCount: Int {
+        viewModel.decisionByGroupId.values.count {
+            $0.state == .merged
         }
     }
 

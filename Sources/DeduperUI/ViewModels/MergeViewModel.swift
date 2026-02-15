@@ -13,6 +13,8 @@ public enum MergeValidationWarning: Sendable, Identifiable {
     case keeperChanged(groupIndex: Int, path: String)
     case nonKeeperMissing(groupIndex: Int, count: Int)
     case keeperConflict(groupIndex: Int, path: String)
+    case protectedPath(groupIndex: Int, path: String)
+    case companionIsKeeper(groupIndex: Int, path: String)
 
     public var id: String {
         switch self {
@@ -22,6 +24,8 @@ public enum MergeValidationWarning: Sendable, Identifiable {
         case .keeperChanged(let i, _): "keeperChanged-\(i)"
         case .nonKeeperMissing(let i, _): "nonKeeperMissing-\(i)"
         case .keeperConflict(let i, _): "keeperConflict-\(i)"
+        case .protectedPath(let i, _): "protectedPath-\(i)"
+        case .companionIsKeeper(let i, _): "companionKeeper-\(i)"
         }
     }
 
@@ -46,6 +50,10 @@ public enum MergeValidationWarning: Sendable, Identifiable {
             "Group \(i): \(c) file(s) already missing"
         case .keeperConflict(let i, let p):
             "Group \(i): file is keeper elsewhere — \(URL(fileURLWithPath: p).lastPathComponent)"
+        case .protectedPath(let i, let p):
+            "Group \(i): protected system path — \(URL(fileURLWithPath: p).lastPathComponent)"
+        case .companionIsKeeper(let i, let p):
+            "Group \(i): companion is keeper elsewhere — \(URL(fileURLWithPath: p).lastPathComponent)"
         }
     }
 }
@@ -119,6 +127,12 @@ public final class MergeViewModel {
     private let quarantineRoot: URL?
     private var validateTask: Task<Void, Never>?
     private var executeTask: Task<Void, Never>?
+    /// Group IDs from the last successful merge, for undo reversal.
+    private var lastMergedGroupIds: [UUID]?
+    /// Session that was merged — undo only offered when this matches.
+    public private(set) var lastMergedSessionId: UUID?
+    /// Container reference for undo decision transitions.
+    private var lastContainer: ModelContainer?
 
     public init(
         logDirectory: URL? = nil,
@@ -137,6 +151,7 @@ public final class MergeViewModel {
     ) {
         validateTask?.cancel()
         phase = .validating
+        lastMergedSessionId = sessionId
 
         validateTask = Task {
             do {
@@ -169,7 +184,10 @@ public final class MergeViewModel {
     // MARK: - Execute
 
     /// Execute the validated merge plan.
-    public func execute(plan: MergePlan) {
+    public func execute(
+        plan: MergePlan,
+        container: ModelContainer? = nil
+    ) {
         executeTask?.cancel()
         phase = .executing
 
@@ -192,6 +210,22 @@ public final class MergeViewModel {
                 }.value
 
                 lastTransaction = transaction
+                let mergedIds = plan.items.map(\.id)
+                lastMergedGroupIds = mergedIds
+
+                // Only transition to .merged when execution
+                // fully succeeded — partial failures keep
+                // decisions as .approved so the user can retry.
+                if let container, transaction.errorCount == 0 {
+                    lastContainer = container
+                    transitionToMerged(
+                        groupIds: mergedIds,
+                        container: container
+                    )
+                } else if let container {
+                    lastContainer = container
+                }
+
                 phase = .completed(transaction)
             } catch is CancellationError {
                 // Normal cancellation
@@ -201,6 +235,12 @@ public final class MergeViewModel {
             }
         }
     }
+
+    /// Callback for the parent view to update in-memory decision
+    /// snapshots after merge/undo transitions. Carries the target
+    /// state explicitly — never inferred from current snapshot.
+    public var onDecisionsTransitioned:
+        (([UUID], DecisionState) -> Void)?
 
     // MARK: - Undo
 
@@ -214,7 +254,14 @@ public final class MergeViewModel {
             }.value
 
             if failures.isEmpty {
+                // Reverse .merged → .approved in SwiftData
+                if let container = lastContainer {
+                    transitionToApproved(
+                        container: container
+                    )
+                }
                 lastTransaction = nil
+                lastMergedGroupIds = nil
                 phase = .idle
             } else {
                 phase = .undoFailed(
@@ -231,6 +278,72 @@ public final class MergeViewModel {
         validateTask?.cancel()
         executeTask?.cancel()
         phase = .idle
+    }
+
+    // MARK: - Decision Transitions
+
+    /// Transition merged groups from .approved to .merged in SwiftData.
+    private func transitionToMerged(
+        groupIds: [UUID],
+        container: ModelContainer
+    ) {
+        let context = ModelContext(container)
+        for gid in groupIds {
+            let id = gid
+            let pred = #Predicate<ReviewDecision> {
+                $0.groupId == id
+            }
+            var desc = FetchDescriptor<ReviewDecision>(
+                predicate: pred
+            )
+            desc.fetchLimit = 1
+            if let decision = try? context.fetch(desc).first,
+               decision.decisionState == .approved {
+                decision.decisionState = .merged
+                decision.decidedAt = Date()
+            }
+        }
+        do {
+            try context.save()
+        } catch {
+            Self.logger.error(
+                "Failed to persist .merged transition: \(error)"
+            )
+        }
+
+        onDecisionsTransitioned?(groupIds, .merged)
+    }
+
+    /// Reverse merged groups back to .approved after undo.
+    private func transitionToApproved(
+        container: ModelContainer
+    ) {
+        guard let ids = lastMergedGroupIds else { return }
+        let context = ModelContext(container)
+        for gid in ids {
+            let id = gid
+            let pred = #Predicate<ReviewDecision> {
+                $0.groupId == id
+            }
+            var desc = FetchDescriptor<ReviewDecision>(
+                predicate: pred
+            )
+            desc.fetchLimit = 1
+            if let decision = try? context.fetch(desc).first,
+               decision.decisionState == .merged {
+                decision.decisionState = .approved
+                decision.decidedAt = Date()
+            }
+        }
+        do {
+            try context.save()
+        } catch {
+            Self.logger.error(
+                "Failed to persist .approved reversal: \(error)"
+            )
+        }
+
+        onDecisionsTransitioned?(ids, .approved)
     }
 
     // MARK: - Private: Fetch (main actor)
@@ -391,19 +504,45 @@ public final class MergeViewModel {
 
                 // Protected path check
                 guard !isProtectedPath(url) else {
-                    warnings.append(.keeperConflict(
+                    warnings.append(.protectedPath(
                         groupIndex: group.groupIndex,
                         path: path
                     ))
                     continue
                 }
 
-                // Resolve companions
+                // Resolve companions: filter keepers, dedup,
+                // protect, and canonicalize
                 let companionSet = CompanionResolver()
                     .resolve(for: url)
+                let safeCompanions: [URL] = companionSet.companionURLs
+                    .compactMap { companion in
+                        let cPath = canonicalize(companion.path)
+                        // Keeper protection
+                        if keeperSet.contains(cPath) {
+                            warnings.append(.companionIsKeeper(
+                                groupIndex: group.groupIndex,
+                                path: companion.path
+                            ))
+                            return nil
+                        }
+                        // Dedup across all moved paths
+                        let cURL = URL(fileURLWithPath: cPath)
+                        guard seenMovePaths.insert(cPath).inserted
+                        else { return nil }
+                        // Protected path check
+                        guard !isProtectedPath(cURL) else {
+                            warnings.append(.protectedPath(
+                                groupIndex: group.groupIndex,
+                                path: companion.path
+                            ))
+                            return nil
+                        }
+                        return cURL
+                    }
                 bundles.append(AssetBundle(
                     primary: url,
-                    companions: companionSet.companionURLs
+                    companions: safeCompanions
                 ))
             }
 

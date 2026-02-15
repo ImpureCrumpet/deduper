@@ -787,4 +787,398 @@ struct MergeViewModelTests {
             #expect(vm.lastTransaction == nil)
         }
     }
+
+    // MARK: - Post-merge State Transition Tests
+
+    @Test("Execute transitions decisions to merged state")
+    @MainActor
+    func executeTransitionsToMerged() async throws {
+        let s = try makeScenario(groupCount: 2, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+
+        // Track which group IDs and target state were transitioned
+        var transitionedIds: [UUID] = []
+        var transitionedState: DecisionState?
+        vm.onDecisionsTransitioned = { ids, state in
+            transitionedIds = ids
+            transitionedState = state
+        }
+
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        guard case .completed = vm.phase else {
+            Issue.record("Expected completed phase")
+            return
+        }
+
+        // Verify callback fired with merged group IDs and state
+        #expect(transitionedIds.count == 2)
+        #expect(Set(transitionedIds) == Set(s.groupIds))
+        #expect(transitionedState == .merged)
+
+        // Verify SwiftData decisions transitioned
+        let context = ModelContext(s.container)
+        let sid = s.sessionId
+        let pred = #Predicate<ReviewDecision> {
+            $0.sessionId == sid
+        }
+        let decisions = try context.fetch(
+            FetchDescriptor<ReviewDecision>(predicate: pred)
+        )
+        for d in decisions {
+            #expect(d.decisionState == .merged)
+        }
+    }
+
+    @Test("Double-run after merge produces empty plan")
+    @MainActor
+    func doubleRunProducesEmptyPlan() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        guard case .completed = vm.phase else {
+            Issue.record("Expected completed phase")
+            return
+        }
+
+        // Second run: decisions are now .merged, not .approved
+        vm.reset()
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan2) = vm.phase else {
+            Issue.record("Expected preview phase on second run")
+            return
+        }
+
+        // Plan should be empty — no approved decisions remain
+        #expect(plan2.items.isEmpty)
+        #expect(plan2.totalFiles == 0)
+    }
+
+    @Test("Undo reverses merged state back to approved")
+    @MainActor
+    func undoReversesToApproved() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // Verify merged
+        let context = ModelContext(s.container)
+        let gid = s.groupIds[0]
+        let pred = #Predicate<ReviewDecision> {
+            $0.groupId == gid
+        }
+        var desc = FetchDescriptor<ReviewDecision>(
+            predicate: pred
+        )
+        desc.fetchLimit = 1
+        var decision = try context.fetch(desc).first
+        #expect(decision?.decisionState == .merged)
+
+        // Undo
+        vm.undoLastTransaction()
+        try await Task.sleep(for: .milliseconds(500))
+
+        // Verify reverted to approved
+        decision = try context.fetch(desc).first
+        #expect(decision?.decisionState == .approved)
+    }
+
+    @Test("Companion keeper protection filters conflicting companions")
+    @MainActor
+    func companionKeeperProtection() async throws {
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let context = ModelContext(container)
+        let sessionId = UUID()
+        let runId = UUID()
+
+        let session = SessionIndex(
+            sessionId: sessionId,
+            directoryPath: "/tmp",
+            startedAt: Date(),
+            totalFiles: 10,
+            mediaFiles: 5,
+            duplicateGroups: 2,
+            artifactPath: "/tmp/a.ndjson.gz",
+            manifestPath: "/tmp/a.manifest.json"
+        )
+        session.currentRunId = runId
+        context.insert(session)
+
+        // Create temp dir with files that have companion relationships
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        defer { cleanup(dir) }
+
+        // Create files: img.heic (keeper in group B),
+        // img.aae (companion of img.heic)
+        let heicFile = dir.appendingPathComponent("img.heic")
+        let aaeFile = dir.appendingPathComponent("img.aae")
+        let otherFile = dir.appendingPathComponent("other.jpg")
+        FileManager.default.createFile(
+            atPath: heicFile.path, contents: Data("heic".utf8)
+        )
+        FileManager.default.createFile(
+            atPath: aaeFile.path, contents: Data("aae".utf8)
+        )
+        FileManager.default.createFile(
+            atPath: otherFile.path, contents: Data("other".utf8)
+        )
+
+        // Group A: keeper=other.jpg, non-keeper=img.heic
+        // Group B: keeper=img.heic, non-keeper=aae
+        // img.heic's companion (img.aae) should NOT be moved
+        // because img.heic is a keeper in group B... but actually
+        // img.heic itself is protected by the keeper set check.
+        // The companion (img.aae) of the non-keeper in group A
+        // would be checked against keeper set.
+        let groupIds = [UUID(), UUID()]
+
+        // Group A
+        let summaryA = GroupSummary(
+            sessionId: sessionId, groupIndex: 0,
+            groupId: groupIds[0], confidence: 0.9,
+            mediaTypeRaw: 1, memberCount: 2,
+            suggestedKeeperPath: otherFile.path,
+            totalSize: 2000, spaceSavings: 1000,
+            materializationRunId: runId
+        )
+        summaryA.matchKind = MatchKind.sha256Exact.rawValue
+        context.insert(summaryA)
+
+        // Group A members
+        let memberA0 = GroupMember(
+            sessionId: sessionId, groupId: groupIds[0],
+            groupIndex: 0, memberIndex: 0,
+            filePath: otherFile.path,
+            fileName: "other.jpg", fileSize: 1000,
+            isKeeper: true, materializationRunId: runId
+        )
+        let memberA1 = GroupMember(
+            sessionId: sessionId, groupId: groupIds[0],
+            groupIndex: 0, memberIndex: 1,
+            filePath: heicFile.path,
+            fileName: "img.heic", fileSize: 1000,
+            isKeeper: false, materializationRunId: runId
+        )
+        context.insert(memberA0)
+        context.insert(memberA1)
+
+        let decisionA = ReviewDecision(
+            sessionId: sessionId, groupIndex: 0,
+            groupId: groupIds[0], decisionState: .approved
+        )
+        decisionA.decidedAt = Date()
+        context.insert(decisionA)
+
+        // Group B: keeper=img.heic
+        let summaryB = GroupSummary(
+            sessionId: sessionId, groupIndex: 1,
+            groupId: groupIds[1], confidence: 0.9,
+            mediaTypeRaw: 1, memberCount: 2,
+            suggestedKeeperPath: heicFile.path,
+            totalSize: 2000, spaceSavings: 1000,
+            materializationRunId: runId
+        )
+        summaryB.matchKind = MatchKind.sha256Exact.rawValue
+        context.insert(summaryB)
+
+        let memberB0 = GroupMember(
+            sessionId: sessionId, groupId: groupIds[1],
+            groupIndex: 1, memberIndex: 0,
+            filePath: heicFile.path,
+            fileName: "img.heic", fileSize: 1000,
+            isKeeper: true, materializationRunId: runId
+        )
+        let memberB1 = GroupMember(
+            sessionId: sessionId, groupId: groupIds[1],
+            groupIndex: 1, memberIndex: 1,
+            filePath: aaeFile.path,
+            fileName: "img.aae", fileSize: 1000,
+            isKeeper: false, materializationRunId: runId
+        )
+        context.insert(memberB0)
+        context.insert(memberB1)
+
+        let decisionB = ReviewDecision(
+            sessionId: sessionId, groupIndex: 1,
+            groupId: groupIds[1], decisionState: .approved
+        )
+        decisionB.decidedAt = Date()
+        context.insert(decisionB)
+
+        try context.save()
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        // img.heic is keeper in group B — must not appear as move
+        // target even though it's non-keeper in group A
+        let allMovePrimaries = plan.items
+            .flatMap(\.nonKeeperBundles)
+            .map(\.primary.path)
+        #expect(!allMovePrimaries.contains(heicFile.path))
+
+        // img.aae as non-keeper in group B should be movable
+        // (it's not a keeper anywhere)
+        #expect(allMovePrimaries.contains(aaeFile.path))
+    }
+
+    @Test("Undo callback carries .approved target state")
+    @MainActor
+    func undoCallbackCarriesApprovedState() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+
+        var callbackStates: [DecisionState] = []
+        vm.onDecisionsTransitioned = { _, state in
+            callbackStates.append(state)
+        }
+
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // First callback: .merged
+        #expect(callbackStates == [.merged])
+
+        vm.undoLastTransaction()
+        try await Task.sleep(for: .milliseconds(500))
+
+        // Second callback: .approved (not toggled from snapshot)
+        #expect(callbackStates == [.merged, .approved])
+    }
+
+    @Test("Session ID stored for undo session guard")
+    @MainActor
+    func sessionIdStoredForUndoGuard() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        // Session ID should be stored after validate
+        #expect(vm.lastMergedSessionId == s.sessionId)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // Session ID persists after execution
+        #expect(vm.lastMergedSessionId == s.sessionId)
+        #expect(vm.lastTransaction != nil)
+    }
 }

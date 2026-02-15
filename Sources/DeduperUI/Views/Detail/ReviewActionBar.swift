@@ -31,17 +31,29 @@ public struct ReviewActionBar: View {
         self._showRename = showRename
     }
 
+    private var isMerged: Bool {
+        decisionState == .merged
+    }
+
     public var body: some View {
         HStack(spacing: 12) {
             DecisionStateBadge(state: decisionState)
 
+            if isMerged {
+                Text("Undo merge to change decision")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
 
-            renameToggle
-            approveButton
-            skipButton
-            changeKeeperMenu
-            notDuplicateButton
+            if !isMerged {
+                renameToggle
+                approveButton
+                skipButton
+                changeKeeperMenu
+                notDuplicateButton
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
