@@ -8,15 +8,18 @@ public struct GroupListView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var triageBridge: TriageActionBridge
     public let modelContainer: ModelContainer
+    public var onMergeApproved: (() -> Void)?
 
     public init(
         viewModel: GroupListViewModel,
         detailViewModel: GroupDetailViewModel,
-        modelContainer: ModelContainer
+        modelContainer: ModelContainer,
+        onMergeApproved: (() -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.detailViewModel = detailViewModel
         self.modelContainer = modelContainer
+        self.onMergeApproved = onMergeApproved
     }
 
     private let gridColumns = [
@@ -36,11 +39,13 @@ public struct GroupListView: View {
                 totalSpaceSavings: viewModel.totalSpaceSavings,
                 reviewedCount: viewModel.reviewedCount,
                 undecidedExactCount: viewModel.undecidedExactCount,
+                approvedCount: approvedCount,
                 onBatchApproveExact: {
                     viewModel.batchApproveExactMatches(
                         context: modelContext
                     )
-                }
+                },
+                onMergeApproved: onMergeApproved
             )
             Divider()
 
@@ -95,6 +100,12 @@ public struct GroupListView: View {
         // Thumbnails load lazily via onAppear per row/grid item.
         // No bulk prefetch on mode change to avoid unbounded
         // concurrent tasks for large sessions.
+    }
+
+    private var approvedCount: Int {
+        viewModel.decisionByGroupId.values.count {
+            $0.state == .approved
+        }
     }
 
     // MARK: - List Mode

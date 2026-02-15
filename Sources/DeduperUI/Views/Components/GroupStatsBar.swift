@@ -7,7 +7,9 @@ public struct GroupStatsBar: View {
     public let totalSpaceSavings: Int64
     public let reviewedCount: Int
     public let undecidedExactCount: Int
+    public let approvedCount: Int
     public let onBatchApproveExact: (() -> Void)?
+    public let onMergeApproved: (() -> Void)?
 
     @State private var showBatchConfirm = false
 
@@ -17,14 +19,18 @@ public struct GroupStatsBar: View {
         totalSpaceSavings: Int64,
         reviewedCount: Int = 0,
         undecidedExactCount: Int = 0,
-        onBatchApproveExact: (() -> Void)? = nil
+        approvedCount: Int = 0,
+        onBatchApproveExact: (() -> Void)? = nil,
+        onMergeApproved: (() -> Void)? = nil
     ) {
         self.totalGroups = totalGroups
         self.filteredCount = filteredCount
         self.totalSpaceSavings = totalSpaceSavings
         self.reviewedCount = reviewedCount
         self.undecidedExactCount = undecidedExactCount
+        self.approvedCount = approvedCount
         self.onBatchApproveExact = onBatchApproveExact
+        self.onMergeApproved = onMergeApproved
     }
 
     public var body: some View {
@@ -81,6 +87,20 @@ public struct GroupStatsBar: View {
                         + " without resetting decisions."
                     )
                 }
+            }
+
+            if approvedCount > 0, let onMerge = onMergeApproved {
+                Button {
+                    onMerge()
+                } label: {
+                    Label(
+                        "Merge All \(approvedCount) Approved",
+                        systemImage: "arrow.right.doc.on.clipboard"
+                    )
+                    .font(.caption)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
         }
         .foregroundStyle(.secondary)

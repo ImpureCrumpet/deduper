@@ -9,6 +9,8 @@ public struct AppRootView: View {
     @State private var sessionVM = SessionListViewModel()
     @State private var groupVM = GroupListViewModel()
     @State private var detailVM = GroupDetailViewModel()
+    @State private var mergeVM = MergeViewModel()
+    @State private var showMergeSheet = false
 
     @State private var columnVisibility: NavigationSplitViewVisibility =
         .all
@@ -23,7 +25,10 @@ public struct AppRootView: View {
             GroupListView(
                 viewModel: groupVM,
                 detailViewModel: detailVM,
-                modelContainer: modelContext.container
+                modelContainer: modelContext.container,
+                onMergeApproved: {
+                    showMergeSheet = true
+                }
             )
             .navigationSplitViewColumnWidth(min: 300, ideal: 400)
         } detail: {
@@ -47,6 +52,29 @@ public struct AppRootView: View {
                         .frame(width: 100)
                         .help("Materializing groups...")
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                if let tx = mergeVM.lastTransaction {
+                    Button {
+                        mergeVM.undoLastTransaction()
+                    } label: {
+                        Label(
+                            "Undo Merge (\(tx.filesMoved) files)",
+                            systemImage: "arrow.uturn.backward"
+                        )
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showMergeSheet, onDismiss: {
+            mergeVM.reset()
+        }) {
+            if let sid = sessionVM.selectedSessionId {
+                MergeSheet(
+                    viewModel: mergeVM,
+                    sessionId: sid,
+                    modelContainer: modelContext.container
+                )
             }
         }
     }
