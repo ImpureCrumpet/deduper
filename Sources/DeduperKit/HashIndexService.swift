@@ -192,6 +192,22 @@ public actor HashIndexService {
         }
     }
 
+    /// Batch query: process multiple queries in a single actor call.
+    /// Reduces actor hop overhead from N to 1.
+    public func batchQuery(
+        queries: [(hash: UInt64, algorithm: String, excludeFileId: String, maxDistance: Int)]
+    ) -> [[HashMatch]] {
+        queries.map { query in
+            let result = queryWithin(
+                distance: query.maxDistance,
+                of: query.hash,
+                algorithm: query.algorithm,
+                excludeFileId: query.excludeFileId
+            )
+            return result.matches
+        }
+    }
+
     public func findExactMatches(
         for hash: UInt64,
         algorithm: String,

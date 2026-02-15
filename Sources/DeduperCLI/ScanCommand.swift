@@ -5,20 +5,47 @@ import SwiftData
 
 struct Scan: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Scan a directory for duplicate media files."
+        abstract: "Scan directories for duplicate media files."
     )
 
-    @Argument(help: "Path to the directory to scan.")
-    var path: String
+    @Argument(help: "Paths to directories to scan.")
+    var paths: [String]
 
     @Option(name: .long, help: "Similarity threshold (0.0-1.0).")
     var threshold: Double = 0.85
 
+    @Option(
+        name: .long,
+        help: "BK-tree search distance for perceptual matching."
+    )
+    var distance: Int?
+
     @Option(name: .long, help: "Output format.")
     var format: OutputFormat = .table
 
-    @Flag(name: .long, help: "Show what would be found without writing results.")
+    @Flag(
+        name: .long,
+        help: "Show what would be found without writing results."
+    )
     var dryRun = false
+
+    @Flag(
+        name: .long,
+        help: "Only detect exact SHA256 matches (safest mode)."
+    )
+    var exactOnly = false
+
+    @Flag(name: .long, help: "Only process photo files.")
+    var photosOnly = false
+
+    @Flag(name: .long, help: "Only process video files.")
+    var videosOnly = false
+
+    @Flag(
+        name: .long,
+        help: "Include video files in detection (off by default)."
+    )
+    var includeVideos = false
 
     /// Print to stderr when using machine-readable formats.
     private func status(_ message: String) {
@@ -32,17 +59,28 @@ struct Scan: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw ValidationError("Directory not found: \(path)")
+        let urls = paths.map { path in
+            URL(fileURLWithPath:
+                (path as NSString).expandingTildeInPath)
         }
 
-        status("Scanning \(url.path)...")
+        for url in urls {
+            guard FileManager.default.fileExists(
+                atPath: url.path
+            ) else {
+                throw ValidationError(
+                    "Directory not found: \(url.path)"
+                )
+            }
+        }
+
+        let pathList = urls.map(\.path).joined(separator: ", ")
+        status("Scanning \(pathList)...")
 
         let scanner = ScanService()
         var files: [ScannedFile] = []
         var metrics: ScanMetrics?
-        for try await event in scanner.scan(directory: url) {
+        for try await event in scanner.scan(directories: urls) {
             switch event {
             case .item(let file):
                 files.append(file)
@@ -57,6 +95,13 @@ struct Scan: AsyncParsableCommand {
             }
         }
 
+        // Apply media type filters
+        if photosOnly {
+            files = files.filter { $0.mediaType == .photo }
+        } else if videosOnly {
+            files = files.filter { $0.mediaType == .video }
+        }
+
         status("Found \(files.count) media files.")
 
         guard !files.isEmpty else { return }
@@ -65,15 +110,47 @@ struct Scan: AsyncParsableCommand {
         let container = try PersistenceFactory.makeContainer()
         let hashCache = HashCacheService(container: container)
         let detector = DetectionService(hashCache: hashCache)
-        let options = DetectOptions(
-            thresholds: .init(confidenceDuplicate: threshold)
+
+        var thresholds = DetectOptions.Thresholds(
+            confidenceDuplicate: threshold
         )
-        let groups = try await detector.detectDuplicates(
-            in: files,
-            options: options
+        if let dist = distance {
+            thresholds = DetectOptions.Thresholds(
+                imageDistance: dist,
+                confidenceDuplicate: threshold
+            )
+        }
+
+        let options = DetectOptions(
+            thresholds: thresholds,
+            exactOnly: exactOnly,
+            includeVideos: includeVideos || videosOnly
         )
 
-        // Build file ID -> URL map for output and persistence
+        let groups = try await detector.detectDuplicates(
+            in: files,
+            options: options,
+            progress: { progress in
+                switch progress.phase {
+                case .sizeBucketing:
+                    status("  Size bucketing...")
+                case .prehashing(let n, let total):
+                    status("  Prehashing \(n)/\(total)...")
+                case .sha256(let n, let total):
+                    status("  SHA256 \(n)/\(total)...")
+                case .hashing(let n, let total):
+                    status("  Hashing \(n)/\(total)...")
+                case .indexing:
+                    status("  Indexing...")
+                case .querying:
+                    status("  Querying index...")
+                case .complete:
+                    break
+                }
+            }
+        )
+
+        // Build file ID -> URL map
         let fileMap = Dictionary(
             uniqueKeysWithValues: files.map { ($0.id, $0) }
         )
@@ -86,7 +163,7 @@ struct Scan: AsyncParsableCommand {
         if !dryRun {
             sessionId = try await persistSession(
                 container: container,
-                directory: url,
+                directories: urls,
                 files: files,
                 groups: groups,
                 metrics: metrics,
@@ -96,18 +173,28 @@ struct Scan: AsyncParsableCommand {
 
         switch format {
         case .table:
-            printTableOutput(groups, fileMap: fileMap, sessionId: sessionId)
+            printTableOutput(
+                groups, fileMap: fileMap, sessionId: sessionId
+            )
         case .json:
-            printJSONOutput(groups, fileURLMap: fileURLMap, sessionId: sessionId)
+            printJSONOutput(
+                groups,
+                fileURLMap: fileURLMap,
+                sessionId: sessionId
+            )
         case .ndjson:
-            printNDJSONOutput(groups, fileURLMap: fileURLMap, sessionId: sessionId)
+            printNDJSONOutput(
+                groups,
+                fileURLMap: fileURLMap,
+                sessionId: sessionId
+            )
         }
     }
 
     @MainActor
     private func persistSession(
         container: ModelContainer,
-        directory: URL,
+        directories: [URL],
         files: [ScannedFile],
         groups: [DuplicateGroupResult],
         metrics: ScanMetrics?,
@@ -115,19 +202,58 @@ struct Scan: AsyncParsableCommand {
     ) throws -> UUID {
         let context = ModelContext(container)
 
+        // Store directory paths as JSON array for multi-dir support
+        let dirPaths: String
+        if directories.count == 1 {
+            dirPaths = directories[0].path
+        } else {
+            let paths = directories.map(\.path)
+            if let data = try? JSONEncoder().encode(paths),
+               let str = String(data: data, encoding: .utf8) {
+                dirPaths = str
+            } else {
+                dirPaths = directories.map(\.path)
+                    .joined(separator: ", ")
+            }
+        }
+
         let session = ScanSession(
-            directoryPath: directory.path,
+            directoryPath: dirPaths,
             totalFiles: metrics?.totalFiles ?? files.count,
             mediaFiles: metrics?.mediaFiles ?? files.count,
             duplicateGroups: groups.count
         )
         session.completedAt = Date()
 
-        // Serialize group results
-        let storedGroups = groups.map {
-            StoredDuplicateGroup(from: $0, fileMap: fileURLMap)
+        // Write artifact file for scalable storage
+        let storedGroups = groups.enumerated().map { (i, group) in
+            StoredDuplicateGroup(
+                from: group, fileMap: fileURLMap, index: i + 1
+            )
         }
-        session.resultsJSON = try JSONEncoder().encode(storedGroups)
+
+        let artDir = SessionArtifact.artifactDirectory()
+        try FileManager.default.createDirectory(
+            at: artDir, withIntermediateDirectories: true
+        )
+        let artPath = SessionArtifact.artifactPath(
+            for: session.sessionId
+        )
+        try SessionArtifact.write(groups: storedGroups, to: artPath)
+        session.artifactPath = artPath.path
+
+        // Write manifest for GUI session discovery
+        let manifest = SessionManifest(
+            sessionId: session.sessionId,
+            directoryPath: dirPaths,
+            startedAt: session.startedAt,
+            completedAt: session.completedAt,
+            totalFiles: session.totalFiles,
+            mediaFiles: session.mediaFiles,
+            duplicateGroups: session.duplicateGroups,
+            artifactFileName: artPath.lastPathComponent
+        )
+        try manifest.write()
 
         context.insert(session)
         try context.save()
@@ -156,8 +282,10 @@ struct Scan: AsyncParsableCommand {
             )
             print("Group \(index + 1) (\(confidence) confidence):")
             for member in group.members {
-                let path = fileMap[member.fileId]?.url.path ?? "unknown"
-                let keeper = member.fileId == group.keeperSuggestion
+                let path = fileMap[member.fileId]?.url.path
+                    ?? "unknown"
+                let keeper = member.fileId
+                    == group.keeperSuggestion
                     ? " [KEEP]" : ""
                 print("  \(path)\(keeper)")
             }
@@ -166,7 +294,10 @@ struct Scan: AsyncParsableCommand {
 
         if let id = sessionId {
             print("Session: \(id.uuidString)")
-            print("Run 'deduper merge \(id.uuidString)' to remove duplicates.")
+            print(
+                "Run 'deduper merge \(id.uuidString)'"
+                + " to remove duplicates."
+            )
         }
     }
 
@@ -211,8 +342,6 @@ struct Scan: AsyncParsableCommand {
         }
     }
 
-    /// NDJSON: one JSON object per line. First line is session metadata,
-    /// then one line per duplicate group.
     private func printNDJSONOutput(
         _ groups: [DuplicateGroupResult],
         fileURLMap: [UUID: URL],
@@ -256,18 +385,17 @@ struct Scan: AsyncParsableCommand {
             let rationale: String
         }
 
-        // Session header line
         jsonLine(SessionLine(
             type: "session",
             sessionId: sessionId?.uuidString,
             groupCount: groups.count
         ))
 
-        // One line per group
         for group in groups {
             let members = group.members.map { member in
                 MemberLine(
-                    path: fileURLMap[member.fileId]?.path ?? "unknown",
+                    path: fileURLMap[member.fileId]?.path
+                        ?? "unknown",
                     confidence: member.confidence,
                     fileSize: member.fileSize,
                     signals: member.signals.map {

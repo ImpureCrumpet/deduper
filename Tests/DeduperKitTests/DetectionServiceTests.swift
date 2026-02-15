@@ -146,7 +146,14 @@ struct DetectionServiceTests {
         ]
 
         let detector = DetectionService()
-        let groups = try await detector.detectDuplicates(in: files)
+        // Use a low confidence threshold since test images have no
+        // metadata signals — only perceptual hash contributes.
+        let options = DetectOptions(
+            thresholds: .init(confidenceDuplicate: 0.1)
+        )
+        let groups = try await detector.detectDuplicates(
+            in: files, options: options
+        )
 
         #expect(groups.count == 1)
         #expect(groups[0].members.count == 2)
@@ -314,6 +321,169 @@ struct DetectionServiceTests {
         #expect(exactGroup != nil)
         // file1 + file2 + file3 are all identical
         #expect(exactGroup!.members.count >= 2)
+    }
+
+    // MARK: - Prehash / Exact-Only Tests
+
+    @Test("Size bucketing skips unique-size files")
+    func sizeBucketingSkipsUnique() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Create files with different sizes
+        let file1 = dir.appendingPathComponent("unique.jpg")
+        try Data(repeating: 0xFF, count: 100).write(to: file1)
+
+        let file2 = dir.appendingPathComponent("also-unique.jpg")
+        try Data(repeating: 0xAA, count: 200).write(to: file2)
+
+        let files = [
+            ScannedFile(
+                url: file1, mediaType: .photo, fileSize: 100
+            ),
+            ScannedFile(
+                url: file2, mediaType: .photo, fileSize: 200
+            )
+        ]
+
+        let detector = DetectionService()
+        let options = DetectOptions(exactOnly: true)
+        let groups = try await detector.detectDuplicates(
+            in: files, options: options
+        )
+
+        // Different sizes = no exact matches possible
+        #expect(groups.isEmpty)
+    }
+
+    @Test("Prehash discriminates same-size different-content files")
+    func prehashDiscriminates() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Two files with same size but different content
+        let file1 = dir.appendingPathComponent("a.jpg")
+        let file2 = dir.appendingPathComponent("b.jpg")
+        try Data(repeating: 0x01, count: 1024).write(to: file1)
+        try Data(repeating: 0x02, count: 1024).write(to: file2)
+
+        let files = [
+            ScannedFile(
+                url: file1, mediaType: .photo, fileSize: 1024
+            ),
+            ScannedFile(
+                url: file2, mediaType: .photo, fileSize: 1024
+            )
+        ]
+
+        let detector = DetectionService()
+        let options = DetectOptions(exactOnly: true)
+        let groups = try await detector.detectDuplicates(
+            in: files, options: options
+        )
+
+        // Same size but different content = no match
+        #expect(groups.isEmpty)
+    }
+
+    @Test("--exact-only produces no perceptual groups")
+    func exactOnlyNoPerceptual() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let file1 = dir.appendingPathComponent("img1.jpg")
+        let file2 = dir.appendingPathComponent("img2.jpg")
+        try writeTestJPEG(to: file1)
+        try writeVariantJPEG(to: file2)
+
+        let size1 = try FileManager.default
+            .attributesOfItem(atPath: file1.path)[.size]
+            as? Int64 ?? 0
+        let size2 = try FileManager.default
+            .attributesOfItem(atPath: file2.path)[.size]
+            as? Int64 ?? 0
+
+        let files = [
+            ScannedFile(
+                url: file1, mediaType: .photo, fileSize: size1
+            ),
+            ScannedFile(
+                url: file2, mediaType: .photo, fileSize: size2
+            )
+        ]
+
+        let detector = DetectionService()
+        let options = DetectOptions(
+            thresholds: .init(confidenceDuplicate: 0.1),
+            exactOnly: true
+        )
+        let groups = try await detector.detectDuplicates(
+            in: files, options: options
+        )
+
+        // Perceptually similar but not byte-identical
+        #expect(groups.isEmpty)
+    }
+
+    @Test("Confidence filter drops low-confidence groups")
+    func confidenceFilterDropsLow() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let file1 = dir.appendingPathComponent("img1.jpg")
+        let file2 = dir.appendingPathComponent("img2.jpg")
+        try writeTestJPEG(to: file1)
+        try writeVariantJPEG(to: file2)
+
+        let size1 = try FileManager.default
+            .attributesOfItem(atPath: file1.path)[.size]
+            as? Int64 ?? 0
+        let size2 = try FileManager.default
+            .attributesOfItem(atPath: file2.path)[.size]
+            as? Int64 ?? 0
+
+        let files = [
+            ScannedFile(
+                url: file1, mediaType: .photo, fileSize: size1
+            ),
+            ScannedFile(
+                url: file2, mediaType: .photo, fileSize: size2
+            )
+        ]
+
+        let detector = DetectionService()
+
+        // High threshold should filter out weak matches
+        let highOptions = DetectOptions(
+            thresholds: .init(confidenceDuplicate: 0.99)
+        )
+        let highGroups = try await detector.detectDuplicates(
+            in: files, options: highOptions
+        )
+        #expect(highGroups.isEmpty)
+    }
+
+    // MARK: - Name Similarity Tests
+
+    @Test("Bigram similarity scoring")
+    func bigramSimilarity() {
+        // Same name
+        let same = DetectionService.bigramSimilarity(
+            "IMG_001", "IMG_001"
+        )
+        #expect(same == 1.0)
+
+        // Very similar (copy suffix)
+        let copy = DetectionService.bigramSimilarity(
+            "IMG_001", "IMG_001 copy"
+        )
+        #expect(copy > 0.5)
+
+        // Very different
+        let diff = DetectionService.bigramSimilarity(
+            "IMG_001", "vacation_sunset"
+        )
+        #expect(diff < 0.3)
     }
 }
 

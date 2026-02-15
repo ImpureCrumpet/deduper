@@ -1,47 +1,176 @@
 import Foundation
 import os
 
-/// Handles moving duplicate files to trash with transaction logging and undo.
+/// Handles moving duplicate files to quarantine/trash with transaction
+/// logging, undo, and companion file awareness.
 public struct MergeService: Sendable {
     private let logger = Logger(subsystem: "app.deduper", category: "merge")
 
     public init() {}
 
-    /// Move files to trash, logging transactions for undo.
-    /// Returns the transaction log path.
+    // MARK: - Asset Bundle Merge
+
+    /// Move asset bundles to quarantine, logging transactions for undo.
+    /// Each asset is a primary file plus its companion files.
+    /// Companions of the keeper are preserved; companions of non-keepers
+    /// are trashed along with the non-keeper.
+    public func moveToQuarantine(
+        assets: [AssetBundle],
+        logDirectory: URL? = nil,
+        quarantineRoot: URL? = nil
+    ) throws -> MergeTransaction {
+        let logDir = logDirectory ?? defaultLogDirectory()
+        try FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true
+        )
+
+        let txId = UUID()
+        let qRoot = quarantineRoot
+            ?? defaultQuarantineRoot(for: assets)
+
+        // Write-ahead: create planned transaction before any moves
+        var plannedEntries: [MergeTransaction.Entry] = []
+        for asset in assets {
+            let allFiles = [asset.primary] + asset.companions
+            for file in allFiles {
+                let destPath = quarantinePath(
+                    for: file, transactionId: txId, root: qRoot
+                )
+                plannedEntries.append(.init(
+                    originalPath: file.path,
+                    trashedPath: destPath.path,
+                    isCompanion: file != asset.primary,
+                    status: .planned
+                ))
+            }
+        }
+
+        let journalPath = logDir.appendingPathComponent(
+            "merge-\(txId.uuidString).journal.ndjson"
+        )
+        let walTransaction = MergeTransaction(
+            id: txId,
+            date: Date(),
+            entries: plannedEntries,
+            errors: [],
+            mode: .quarantine,
+            status: .planned
+        )
+        try writeTransactionLog(walTransaction, to: logDir)
+        try writeJournalEntry(
+            "planned", txId: txId, to: journalPath
+        )
+
+        // Execute moves
+        var completedEntries: [MergeTransaction.Entry] = []
+        var errors: [MergeTransaction.Error] = []
+
+        for asset in assets {
+            let allFiles = [asset.primary] + asset.companions
+            // Trash companions first, then primary
+            // (so undo restores primary first)
+            let ordered = allFiles.reversed()
+
+            for file in ordered {
+                if isProtectedPath(file) {
+                    errors.append(.init(
+                        originalPath: file.path,
+                        reason: "Protected path -- refusing to move"
+                    ))
+                    logger.warning(
+                        "Skipped protected path: \(file.path)"
+                    )
+                    continue
+                }
+
+                let dest = quarantinePath(
+                    for: file, transactionId: txId, root: qRoot
+                )
+
+                do {
+                    try FileManager.default.createDirectory(
+                        at: dest.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try FileManager.default.moveItem(
+                        at: file, to: dest
+                    )
+                    completedEntries.append(.init(
+                        originalPath: file.path,
+                        trashedPath: dest.path,
+                        isCompanion: file != asset.primary,
+                        status: .completed
+                    ))
+                    try writeJournalEntry(
+                        "moved:\(file.path)->\(dest.path)",
+                        txId: txId, to: journalPath
+                    )
+                    logger.info("Quarantined: \(file.lastPathComponent)")
+                } catch {
+                    errors.append(.init(
+                        originalPath: file.path,
+                        reason: error.localizedDescription
+                    ))
+                    logger.error(
+                        "Failed to quarantine \(file.lastPathComponent): \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+
+        let transaction = MergeTransaction(
+            id: txId,
+            date: Date(),
+            entries: completedEntries,
+            errors: errors,
+            mode: .quarantine,
+            status: .completed
+        )
+
+        try writeTransactionLog(transaction, to: logDir)
+        try writeJournalEntry(
+            "completed", txId: txId, to: journalPath
+        )
+
+        return transaction
+    }
+
+    /// Legacy: move files to OS Trash (for --use-trash flag).
     public func moveToTrash(
         files: [URL],
         logDirectory: URL? = nil
     ) throws -> MergeTransaction {
         let logDir = logDirectory ?? defaultLogDirectory()
         try FileManager.default.createDirectory(
-            at: logDir,
-            withIntermediateDirectories: true
+            at: logDir, withIntermediateDirectories: true
         )
 
+        let txId = UUID()
         var entries: [MergeTransaction.Entry] = []
         var errors: [MergeTransaction.Error] = []
 
         for url in files {
-            // Protected path check
             if isProtectedPath(url) {
                 errors.append(.init(
                     originalPath: url.path,
                     reason: "Protected path -- refusing to move"
                 ))
-                logger.warning("Skipped protected path: \(url.path)")
+                logger.warning(
+                    "Skipped protected path: \(url.path)"
+                )
                 continue
             }
 
             do {
                 var trashedURL: NSURL?
                 try FileManager.default.trashItem(
-                    at: url,
-                    resultingItemURL: &trashedURL
+                    at: url, resultingItemURL: &trashedURL
                 )
                 entries.append(.init(
                     originalPath: url.path,
-                    trashedPath: trashedURL?.path
+                    trashedPath: trashedURL?.path,
+                    isCompanion: false,
+                    status: .completed
                 ))
                 logger.info("Trashed: \(url.lastPathComponent)")
             } catch {
@@ -56,29 +185,34 @@ public struct MergeService: Sendable {
         }
 
         let transaction = MergeTransaction(
-            id: UUID(),
+            id: txId,
             date: Date(),
             entries: entries,
-            errors: errors
+            errors: errors,
+            mode: .trash,
+            status: .completed
         )
 
-        // Write transaction log
-        let logPath = logDir.appendingPathComponent(
-            "merge-\(transaction.id.uuidString).json"
-        )
-        let data = try JSONEncoder().encode(transaction)
-        try data.write(to: logPath)
-        logger.info("Transaction log written to \(logPath.path)")
-
+        try writeTransactionLog(transaction, to: logDir)
         return transaction
     }
 
-    /// Undo a merge by restoring files from trash.
-    /// Note: This is best-effort -- trash items may have been emptied.
+    // MARK: - Undo
+
+    /// Undo a merge by restoring files from quarantine or trash.
+    /// Restores primary files first, then companions.
     public func undo(transaction: MergeTransaction) -> [String] {
         var failures: [String] = []
 
-        for entry in transaction.entries {
+        // Restore in reverse order: primaries first, then companions
+        let sorted = transaction.entries.sorted { a, b in
+            if a.isCompanion != b.isCompanion {
+                return !a.isCompanion // primaries first
+            }
+            return false
+        }
+
+        for entry in sorted {
             guard let trashedPath = entry.trashedPath else {
                 failures.append(
                     "No trash path recorded for \(entry.originalPath)"
@@ -90,11 +224,17 @@ public struct MergeService: Sendable {
             let originalURL = URL(fileURLWithPath: entry.originalPath)
 
             do {
-                try FileManager.default.moveItem(
-                    at: trashedURL,
-                    to: originalURL
+                // Ensure parent directory exists
+                try FileManager.default.createDirectory(
+                    at: originalURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
                 )
-                logger.info("Restored: \(originalURL.lastPathComponent)")
+                try FileManager.default.moveItem(
+                    at: trashedURL, to: originalURL
+                )
+                logger.info(
+                    "Restored: \(originalURL.lastPathComponent)"
+                )
             } catch {
                 failures.append(
                     "\(entry.originalPath): \(error.localizedDescription)"
@@ -105,29 +245,62 @@ public struct MergeService: Sendable {
         return failures
     }
 
+    // MARK: - Purge
+
+    /// Permanently delete quarantined files for a transaction.
+    public func purge(
+        transaction: MergeTransaction,
+        logDirectory: URL? = nil
+    ) throws -> Int {
+        var deleted = 0
+        for entry in transaction.entries {
+            guard let trashedPath = entry.trashedPath else { continue }
+            let url = URL(fileURLWithPath: trashedPath)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+                deleted += 1
+            }
+        }
+
+        // Clean up empty quarantine directory
+        for entry in transaction.entries {
+            guard let trashedPath = entry.trashedPath else { continue }
+            let dir = URL(fileURLWithPath: trashedPath)
+                .deletingLastPathComponent()
+            cleanEmptyDirectories(at: dir)
+        }
+
+        return deleted
+    }
+
+    // MARK: - Transaction Listing
+
     /// List transaction logs from the log directory.
     public func listTransactions(
         logDirectory: URL? = nil
     ) throws -> [MergeTransaction] {
         let logDir = logDirectory ?? defaultLogDirectory()
-        guard FileManager.default.fileExists(atPath: logDir.path) else {
+        guard FileManager.default.fileExists(
+            atPath: logDir.path
+        ) else {
             return []
         }
 
         let contents = try FileManager.default.contentsOfDirectory(
-            at: logDir,
-            includingPropertiesForKeys: nil
+            at: logDir, includingPropertiesForKeys: nil
         )
 
         return contents
-            .filter { $0.pathExtension == "json" }
+            .filter {
+                $0.pathExtension == "json"
+                    && !$0.lastPathComponent.contains("journal")
+            }
             .compactMap { url -> MergeTransaction? in
                 guard let data = try? Data(contentsOf: url) else {
                     return nil
                 }
                 return try? JSONDecoder().decode(
-                    MergeTransaction.self,
-                    from: data
+                    MergeTransaction.self, from: data
                 )
             }
             .sorted { $0.date > $1.date }
@@ -138,15 +311,60 @@ public struct MergeService: Sendable {
     private func isProtectedPath(_ url: URL) -> Bool {
         let path = url.path
         let protectedPrefixes = [
-            "/System",
-            "/Library",
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/Applications",
+            "/System", "/Library", "/usr",
+            "/bin", "/sbin", "/Applications",
             "/private/var"
         ]
         return protectedPrefixes.contains { path.hasPrefix($0) }
+    }
+
+    // MARK: - Quarantine Paths
+
+    private func quarantinePath(
+        for file: URL,
+        transactionId: UUID,
+        root: URL
+    ) -> URL {
+        // Preserve relative path from volume root
+        let filePath = file.path
+        let volumeRoot = volumeRootPath(for: file)
+        let relative: String
+        if filePath.hasPrefix(volumeRoot) {
+            relative = String(filePath.dropFirst(volumeRoot.count))
+        } else {
+            relative = file.lastPathComponent
+        }
+        return root
+            .appendingPathComponent(transactionId.uuidString)
+            .appendingPathComponent(relative)
+    }
+
+    private func volumeRootPath(for url: URL) -> String {
+        // For local volumes, use /Users/<user> as the relative root
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if url.path.hasPrefix(home) {
+            return home
+        }
+        // For external volumes, use /Volumes/<name>
+        if url.path.hasPrefix("/Volumes/") {
+            let parts = url.path.split(separator: "/")
+            if parts.count >= 2 {
+                return "/\(parts[0])/\(parts[1])"
+            }
+        }
+        return "/"
+    }
+
+    private func defaultQuarantineRoot(
+        for assets: [AssetBundle]
+    ) -> URL {
+        // Place quarantine near the source files
+        if let first = assets.first {
+            let dir = first.primary.deletingLastPathComponent()
+            return dir.appendingPathComponent(".deduper_quarantine")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".deduper_quarantine")
     }
 
     private func defaultLogDirectory() -> URL {
@@ -158,6 +376,71 @@ public struct MergeService: Sendable {
             .appendingPathComponent("Deduper")
             .appendingPathComponent("transactions")
     }
+
+    // MARK: - WAL Helpers
+
+    private func writeTransactionLog(
+        _ transaction: MergeTransaction,
+        to logDir: URL
+    ) throws {
+        let logPath = logDir.appendingPathComponent(
+            "merge-\(transaction.id.uuidString).json"
+        )
+        let data = try JSONEncoder().encode(transaction)
+        try data.write(to: logPath)
+        logger.info("Transaction log written to \(logPath.path)")
+    }
+
+    private func writeJournalEntry(
+        _ entry: String,
+        txId: UUID,
+        to path: URL
+    ) throws {
+        let line = "\(ISO8601DateFormatter().string(from: Date()))"
+            + " \(entry)\n"
+        if FileManager.default.fileExists(atPath: path.path) {
+            let handle = try FileHandle(forWritingTo: path)
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try handle.close()
+        } else {
+            try Data(line.utf8).write(to: path)
+        }
+    }
+
+    private func cleanEmptyDirectories(at url: URL) {
+        var current = url
+        let fm = FileManager.default
+        while current.path != "/" {
+            let contents = (try? fm.contentsOfDirectory(
+                atPath: current.path
+            )) ?? ["placeholder"]
+            if contents.isEmpty {
+                try? fm.removeItem(at: current)
+                current = current.deletingLastPathComponent()
+            } else {
+                break
+            }
+        }
+    }
+}
+
+// MARK: - AssetBundle
+
+/// A primary media file and its companion files to be moved together.
+public struct AssetBundle: Sendable, Equatable {
+    public let primary: URL
+    public let companions: [URL]
+
+    public init(primary: URL, companions: [URL] = []) {
+        self.primary = primary
+        self.companions = companions
+    }
+
+    /// All files in this bundle.
+    public var allFiles: [URL] {
+        [primary] + companions
+    }
 }
 
 // MARK: - MergeTransaction
@@ -167,19 +450,67 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
     public let date: Date
     public let entries: [Entry]
     public let errors: [Error]
+    public let mode: MergeMode
+    public let status: TransactionStatus
 
     public var filesMoved: Int { entries.count }
     public var errorCount: Int { errors.count }
 
+    public init(
+        id: UUID,
+        date: Date,
+        entries: [Entry],
+        errors: [Error],
+        mode: MergeMode = .quarantine,
+        status: TransactionStatus = .completed
+    ) {
+        self.id = id
+        self.date = date
+        self.entries = entries
+        self.errors = errors
+        self.mode = mode
+        self.status = status
+    }
+
     public struct Entry: Codable, Sendable {
         public let originalPath: String
         public let trashedPath: String?
+        public let isCompanion: Bool
+        public let status: EntryStatus
+
+        public init(
+            originalPath: String,
+            trashedPath: String?,
+            isCompanion: Bool = false,
+            status: EntryStatus = .completed
+        ) {
+            self.originalPath = originalPath
+            self.trashedPath = trashedPath
+            self.isCompanion = isCompanion
+            self.status = status
+        }
     }
 
     public struct Error: Codable, Sendable {
         public let originalPath: String
         public let reason: String
     }
+
+    public enum EntryStatus: String, Codable, Sendable {
+        case planned
+        case completed
+    }
+}
+
+public enum MergeMode: String, Codable, Sendable {
+    case quarantine
+    case trash
+}
+
+public enum TransactionStatus: String, Codable, Sendable {
+    case planned
+    case completed
+    case failed
 }
 
 // MARK: - MergeError

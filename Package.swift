@@ -41,6 +41,10 @@ let package = Package(
             resources: [
                 .copy("Fixtures")
             ]
+        ),
+        .testTarget(
+            name: "DeduperUITests",
+            dependencies: ["DeduperUI", "DeduperKit"]
         )
     ]
 )

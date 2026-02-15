@@ -147,6 +147,31 @@ struct ScanServiceTests {
         #expect(files.count == 3)
     }
 
+    @Test("Scan two directories finds files from both")
+    func scanMultipleDirectories() async throws {
+        let dir1 = try makeTempDir(files: [
+            "photo1.jpg": Data(repeating: 0xFF, count: 100)
+        ])
+        let dir2 = try makeTempDir(files: [
+            "photo2.png": Data(repeating: 0xAA, count: 200)
+        ])
+        defer { cleanup(dir1); cleanup(dir2) }
+
+        var files: [ScannedFile] = []
+        for try await event in service.scan(
+            directories: [dir1, dir2]
+        ) {
+            if case .item(let file) = event {
+                files.append(file)
+            }
+        }
+
+        #expect(files.count == 2)
+        let names = Set(files.map { $0.url.lastPathComponent })
+        #expect(names.contains("photo1.jpg"))
+        #expect(names.contains("photo2.png"))
+    }
+
     @Test("Scan records file sizes")
     func scanRecordsFileSizes() async throws {
         let dir = try makeTempDir(files: [

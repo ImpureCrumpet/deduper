@@ -1,18 +1,30 @@
 import SwiftUI
-import DeduperKit
+import SwiftData
+import DeduperUI
 
 @main
 struct DeduperApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
+    private let container: ModelContainer
+    @StateObject private var triageBridge = TriageActionBridge()
+
+    init() {
+        do {
+            container = try UIPersistenceFactory.makeContainer()
+        } catch {
+            fatalError("Failed to create model container: \(error)")
         }
     }
-}
 
-struct ContentView: View {
-    var body: some View {
-        Text("Deduper")
-            .frame(width: 400, height: 300)
+    var body: some Scene {
+        WindowGroup {
+            AppRootView()
+                .environmentObject(triageBridge)
+        }
+        .modelContainer(container)
+        .commands { TriageCommands(bridge: triageBridge) }
+
+        Settings {
+            SettingsView()
+        }
     }
 }

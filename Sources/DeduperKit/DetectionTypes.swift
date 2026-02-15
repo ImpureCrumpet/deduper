@@ -1,6 +1,37 @@
 import Foundation
 import os
 
+// MARK: - Match Kind
+
+/// Discriminator for the type of match that produced a duplicate group.
+/// Stored in artifacts and GroupSummary for safe batch operations.
+public enum MatchKind: String, Codable, Sendable, CaseIterable {
+    /// Byte-identical files confirmed by SHA256 digest.
+    case sha256Exact
+    /// Perceptual hash similarity (dHash/pHash).
+    case perceptual
+    /// Video fingerprint heuristic match.
+    case videoHeuristic
+    /// V1 artifact without explicit matchKind — re-scan for classification.
+    case legacyUnknown
+
+    public var displayName: String {
+        switch self {
+        case .sha256Exact: "Exact (SHA256)"
+        case .perceptual: "Perceptual"
+        case .videoHeuristic: "Video"
+        case .legacyUnknown: "Legacy (re-scan for classification)"
+        }
+    }
+
+    /// Cases suitable for user-facing filter pickers.
+    /// Excludes `.legacyUnknown` which is an artifact-version state,
+    /// not a meaningful match category.
+    public static var filterableCases: [MatchKind] {
+        allCases.filter { $0 != .legacyUnknown }
+    }
+}
+
 // MARK: - Detection Options
 
 public struct DetectOptions: Sendable, Equatable {
@@ -137,17 +168,25 @@ public struct DetectOptions: Sendable, Equatable {
     public let limits: Limits
     public let policies: Policies
     public let weights: ConfidenceWeights
+    /// When true, skip perceptual hashing and only detect exact SHA256 matches.
+    public let exactOnly: Bool
+    /// When true, include video files in detection. Default false at scale.
+    public let includeVideos: Bool
 
     public init(
         thresholds: Thresholds = Thresholds(),
         limits: Limits = Limits(),
         policies: Policies = Policies(),
-        weights: ConfidenceWeights = ConfidenceWeights()
+        weights: ConfidenceWeights = ConfidenceWeights(),
+        exactOnly: Bool = false,
+        includeVideos: Bool = false
     ) {
         self.thresholds = thresholds
         self.limits = limits
         self.policies = policies
         self.weights = weights
+        self.exactOnly = exactOnly
+        self.includeVideos = includeVideos
     }
 }
 

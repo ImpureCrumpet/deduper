@@ -165,6 +165,46 @@ struct HashIndexServiceTests {
         #expect(count == 0)
     }
 
+    @Test("Batch query returns same results as individual queries")
+    func batchQuerySameResults() async {
+        let index = makeIndex()
+        let hashes: [UInt64] = [100, 103, 200, 300]
+        for (i, hash) in hashes.enumerated() {
+            await index.add(
+                fileId: "file\(i)",
+                hashResult: HashResult(
+                    algorithm: "dHash", hash: hash
+                )
+            )
+        }
+
+        // Individual queries
+        let result0 = await index.queryWithin(
+            distance: 5, of: 100, algorithm: "dHash",
+            excludeFileId: "file0"
+        )
+        let result1 = await index.queryWithin(
+            distance: 5, of: 200, algorithm: "dHash",
+            excludeFileId: "file2"
+        )
+
+        // Batch query
+        let batchResults = await index.batchQuery(queries: [
+            (hash: 100, algorithm: "dHash",
+             excludeFileId: "file0", maxDistance: 5),
+            (hash: 200, algorithm: "dHash",
+             excludeFileId: "file2", maxDistance: 5)
+        ])
+
+        #expect(batchResults.count == 2)
+        #expect(
+            batchResults[0].count == result0.matches.count
+        )
+        #expect(
+            batchResults[1].count == result1.matches.count
+        )
+    }
+
     @Test("HashMatch confidence calculation")
     func hashMatchConfidence() {
         let exact = HashMatch(
