@@ -12,9 +12,19 @@ import SwiftUI
 ///
 /// This approach avoids the unreliable `@FocusedValue` /
 /// `@FocusedObject` → Commands re-evaluation path on macOS.
+@MainActor
 public final class TriageActionBridge: ObservableObject {
     // MARK: - State
     @Published public var isActive: Bool = false
+    /// When true, menu key equivalents are disabled (e.g. while
+    /// typing in search field or other text input).
+    @Published public var suppressShortcuts: Bool = false
+
+    /// True only when the bridge is active and shortcuts are not
+    /// suppressed by a text input gaining focus.
+    public var shortcutsEnabled: Bool {
+        isActive && !suppressShortcuts
+    }
 
     // MARK: - Review actions
     public var approve: (() -> Void)?
@@ -48,6 +58,7 @@ public final class TriageActionBridge: ObservableObject {
 
     public func deactivate() {
         isActive = false
+        suppressShortcuts = false
         approve = nil
         skip = nil
         markNotDuplicate = nil

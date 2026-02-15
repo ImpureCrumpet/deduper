@@ -334,4 +334,102 @@ struct TriageLoopTests {
         // normalizeSelection should pick first remaining, not nil
         #expect(vm.selectedGroupId == groups[0].groupId)
     }
+
+    // MARK: - Filter normalization regression tests
+
+    @Test(
+        "Discrete filter change normalizes selection to first visible"
+    )
+    @MainActor
+    func discreteFilterNormalizesSelection() {
+        let (vm, groups, _) = makeVM(groupCount: 5)
+        // Approve groups 0 and 1 in the map
+        vm.hydrateDecisionSnapshot(
+            groupId: groups[0].groupId,
+            snapshot: DecisionSnapshot(
+                state: .approved, decidedAt: Date()
+            )
+        )
+        vm.hydrateDecisionSnapshot(
+            groupId: groups[1].groupId,
+            snapshot: DecisionSnapshot(
+                state: .approved, decidedAt: Date()
+            )
+        )
+
+        // Select group 0 (approved)
+        vm.selectedGroupId = groups[0].groupId
+
+        // Toggle to undecided-only: group 0 vanishes
+        vm.decisionStateFilter = .undecided
+
+        #expect(vm.filteredGroups.count == 3)
+        // Selection should normalize to first visible
+        #expect(vm.selectedGroupId == groups[2].groupId)
+    }
+
+    @Test(
+        "Discrete filter change that empties list clears selection"
+    )
+    @MainActor
+    func discreteFilterEmptyListClearsSelection() {
+        let container = try! UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let context = ModelContext(container)
+        let sessionId = UUID()
+        let runId = UUID()
+
+        // Create groups with mixed match kinds
+        var groups: [GroupSummary] = []
+        for i in 0..<3 {
+            let group = GroupSummary(
+                sessionId: sessionId,
+                groupIndex: i,
+                groupId: UUID(),
+                confidence: 0.9,
+                mediaTypeRaw: 1,
+                memberCount: 2,
+                suggestedKeeperPath: "/tmp/g\(i)/file.jpg",
+                totalSize: 2000,
+                spaceSavings: 1000,
+                materializationRunId: runId
+            )
+            group.matchKind = MatchKind.sha256Exact.rawValue
+            context.insert(group)
+            groups.append(group)
+        }
+        try! context.save()
+
+        let vm = GroupListViewModel()
+        vm.loadGroups(
+            sessionId: sessionId,
+            currentRunId: runId,
+            context: context
+        )
+        vm.selectedGroupId = groups[1].groupId
+
+        // Filter to perceptual — none exist
+        vm.matchKindFilter = MatchKind.perceptual.rawValue
+
+        #expect(vm.filteredGroups.isEmpty)
+        #expect(vm.selectedGroupId == nil)
+    }
+
+    @Test(
+        "Search text change does NOT normalize (avoids typing churn)"
+    )
+    @MainActor
+    func searchTextDoesNotNormalize() {
+        let (vm, groups, _) = makeVM(groupCount: 5)
+        vm.selectedGroupId = groups[0].groupId
+
+        // Search for something that doesn't match group 0
+        vm.searchText = "zzz_nonexistent"
+
+        // Filtered list is empty but selection should NOT
+        // have been normalized (search typing exception)
+        #expect(vm.filteredGroups.isEmpty)
+        #expect(vm.selectedGroupId == groups[0].groupId)
+    }
 }

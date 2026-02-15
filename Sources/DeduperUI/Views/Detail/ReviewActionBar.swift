@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Toolbar with review decision buttons.
-/// Keyboard shortcuts are handled by `TriageCommands` via focused values,
+/// Keyboard shortcuts are handled by `TriageCommands` via
+/// `TriageActionBridge` (`@ObservedObject` in Commands),
 /// not by button-level `.keyboardShortcut()` modifiers.
 public struct ReviewActionBar: View {
     public let decisionState: DecisionState
@@ -103,6 +104,6 @@ public struct ReviewActionBar: View {
             Label("Not Duplicate", systemImage: "xmark.circle")
         }
         .disabled(members.isEmpty)
-        .help("Mark as not duplicate (⌫)")
+        .help("Mark as not duplicate (⌘⌫)")
     }
 }

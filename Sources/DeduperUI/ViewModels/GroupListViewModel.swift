@@ -76,19 +76,19 @@ public final class GroupListViewModel {
         didSet { applyFilters() }
     }
     public var mediaTypeFilter: Int16? = nil {
-        didSet { applyFilters() }
+        didSet { applyFilters(); normalizeSelection() }
     }
     public var showLargeGroupsOnly: Bool = false {
-        didSet { applyFilters() }
+        didSet { applyFilters(); normalizeSelection() }
     }
     public var showMixedFormatOnly: Bool = false {
-        didSet { applyFilters() }
+        didSet { applyFilters(); normalizeSelection() }
     }
     public var matchKindFilter: String? = nil {
-        didSet { applyFilters() }
+        didSet { applyFilters(); normalizeSelection() }
     }
     public var decisionStateFilter: DecisionState? = nil {
-        didSet { applyFilters() }
+        didSet { applyFilters(); normalizeSelection() }
     }
 
     // Auto-advance
@@ -376,8 +376,9 @@ public final class GroupListViewModel {
 
     /// Ensures `selectedGroupId` is valid in `filteredGroups`.
     /// Called after decision-driven transitions (commitDecision,
-    /// loadDecisionIndex, batchApprove) — NOT after every applyFilters
-    /// to avoid detail pane churn during search typing.
+    /// loadDecisionIndex, batchApprove) and discrete filter changes
+    /// (mediaType, matchKind, decisionState, etc.) — but NOT after
+    /// searchText changes, to avoid detail pane churn while typing.
     private func normalizeSelection() {
         guard let current = selectedGroupId else { return }
         if !filteredGroups.contains(where: {

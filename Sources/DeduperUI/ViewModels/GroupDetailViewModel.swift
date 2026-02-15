@@ -107,12 +107,15 @@ public final class GroupDetailViewModel {
         let groupId = groupSummary.groupId
         let expectedEpoch = selectionEpoch
 
-        loadTask = Task {
+        loadTask = Task { @MainActor in
             do {
                 // Fetch members from SwiftData on main actor
                 let memberRows = try fetchMembers(
                     groupId: groupId, container: container
                 )
+
+                try Task.checkCancellation()
+                guard expectedEpoch == selectionEpoch else { return }
 
                 guard !memberRows.isEmpty else {
                     errorMessage = "No members found for group."
@@ -120,13 +123,10 @@ public final class GroupDetailViewModel {
                     return
                 }
 
-                try Task.checkCancellation()
-
                 // Enrich off-main with bounded concurrency
                 let details = try await enrichMembers(memberRows)
 
                 try Task.checkCancellation()
-                // Guard: only write if selection hasn't changed
                 guard expectedEpoch == selectionEpoch else { return }
                 members = details
                 isLoading = false
@@ -137,6 +137,7 @@ public final class GroupDetailViewModel {
                 Self.logger.error(
                     "Failed to load group detail: \(error)"
                 )
+                guard expectedEpoch == selectionEpoch else { return }
                 errorMessage = "Failed to load group."
                 isLoading = false
             }
@@ -314,7 +315,12 @@ public final class GroupDetailViewModel {
             decision.renameTemplateJSON = nil
         }
 
-        if let keeperPath {
+        // Keeper fields are only meaningful for approved decisions.
+        if state != .approved {
+            decision.selectedKeeperPath = nil
+            decision.selectedKeeperFingerprint = nil
+            decision.selectedKeeperFileSize = nil
+        } else if let keeperPath {
             decision.selectedKeeperPath = keeperPath
             let url = URL(fileURLWithPath: keeperPath)
             decision.selectedKeeperFingerprint =

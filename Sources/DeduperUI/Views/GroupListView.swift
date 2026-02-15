@@ -6,6 +6,7 @@ public struct GroupListView: View {
     @Bindable public var viewModel: GroupListViewModel
     @Bindable public var detailViewModel: GroupDetailViewModel
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var triageBridge: TriageActionBridge
     public let modelContainer: ModelContainer
 
     public init(
@@ -56,6 +57,7 @@ public struct GroupListView: View {
             text: $viewModel.searchText,
             prompt: "Search by filename..."
         )
+        .modifier(SearchFocusSuppressor(bridge: triageBridge))
         .overlay {
             if viewModel.allGroups.isEmpty {
                 ContentUnavailableView(
@@ -90,13 +92,9 @@ public struct GroupListView: View {
                 detailViewModel.clear()
             }
         }
-        .onChange(of: viewModel.listMode) { _, mode in
-            if mode != .list {
-                viewModel.loadThumbnails(
-                    for: viewModel.filteredGroups
-                )
-            }
-        }
+        // Thumbnails load lazily via onAppear per row/grid item.
+        // No bulk prefetch on mode change to avoid unbounded
+        // concurrent tasks for large sessions.
     }
 
     // MARK: - List Mode
@@ -155,6 +153,67 @@ public struct GroupListView: View {
             }
             .padding(8)
         }
+    }
+}
+
+/// Modifier that drives `TriageActionBridge.suppressShortcuts`
+/// from search-field focus state. `.searchFocused` requires
+/// macOS 15+; on macOS 14 we fall back to AppKit text-editing
+/// notifications, which suppress shortcuts for any text field
+/// (search, rename, etc.).
+private struct SearchFocusSuppressor: ViewModifier {
+    let bridge: TriageActionBridge
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.modifier(
+                SearchFocusBinding(bridge: bridge)
+            )
+        } else {
+            content.modifier(
+                TextEditSuppressor(bridge: bridge)
+            )
+        }
+    }
+}
+
+@available(macOS 15.0, *)
+private struct SearchFocusBinding: ViewModifier {
+    let bridge: TriageActionBridge
+    @FocusState private var searchFocused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .searchFocused($searchFocused)
+            .onChange(of: searchFocused) { _, focused in
+                bridge.suppressShortcuts = focused
+            }
+    }
+}
+
+/// Pre-macOS 15 fallback: suppress shortcuts while any NSControl
+/// text field is being edited, using AppKit notifications.
+private struct TextEditSuppressor: ViewModifier {
+    let bridge: TriageActionBridge
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSControl
+                        .textDidBeginEditingNotification
+                )
+            ) { _ in
+                bridge.suppressShortcuts = true
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSControl
+                        .textDidEndEditingNotification
+                )
+            ) { _ in
+                bridge.suppressShortcuts = false
+            }
     }
 }
 
