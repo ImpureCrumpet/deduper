@@ -16,6 +16,8 @@ public struct MergeService: Sendable {
     /// are trashed along with the non-keeper.
     public func moveToQuarantine(
         assets: [AssetBundle],
+        sessionId: UUID? = nil,
+        groupIds: [UUID]? = nil,
         logDirectory: URL? = nil,
         quarantineRoot: URL? = nil
     ) throws -> MergeTransaction {
@@ -54,7 +56,9 @@ public struct MergeService: Sendable {
             entries: plannedEntries,
             errors: [],
             mode: .quarantine,
-            status: .planned
+            status: .planned,
+            sessionId: sessionId,
+            groupIds: groupIds
         )
         try writeTransactionLog(walTransaction, to: logDir)
         try writeJournalEntry(
@@ -124,7 +128,9 @@ public struct MergeService: Sendable {
             entries: completedEntries,
             errors: errors,
             mode: .quarantine,
-            status: .completed
+            status: .completed,
+            sessionId: sessionId,
+            groupIds: groupIds
         )
 
         try writeTransactionLog(transaction, to: logDir)
@@ -133,6 +139,38 @@ public struct MergeService: Sendable {
         )
 
         return transaction
+    }
+
+    // MARK: - Mark Undone
+
+    /// Mark a transaction as undone by rewriting its log file with
+    /// `.undone` status. Preserves the transaction for audit trail.
+    /// Also appends an "undone" event to the journal for append-only
+    /// audit history.
+    public func markUndone(
+        transaction: MergeTransaction,
+        logDirectory: URL? = nil
+    ) throws {
+        let logDir = logDirectory ?? defaultLogDirectory()
+        let updated = MergeTransaction(
+            id: transaction.id,
+            date: transaction.date,
+            entries: transaction.entries,
+            errors: transaction.errors,
+            mode: transaction.mode,
+            status: .undone,
+            sessionId: transaction.sessionId,
+            groupIds: transaction.groupIds
+        )
+        try writeTransactionLog(updated, to: logDir)
+
+        // Append to journal for immutable audit trail
+        let journalPath = logDir.appendingPathComponent(
+            "merge-\(transaction.id.uuidString).journal.ndjson"
+        )
+        try writeJournalEntry(
+            "undone", txId: transaction.id, to: journalPath
+        )
     }
 
     /// Legacy: move files to OS Trash (for --use-trash flag).
@@ -452,6 +490,13 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
     public let errors: [Error]
     public let mode: MergeMode
     public let status: TransactionStatus
+    /// Session that triggered this merge. Optional for backward
+    /// compatibility with transaction logs written before this field.
+    public let sessionId: UUID?
+    /// Group IDs affected by this transaction. Used to scope undo
+    /// to exactly the groups merged in this operation (not "all
+    /// merged decisions in the session").
+    public let groupIds: [UUID]?
 
     public var filesMoved: Int { entries.count }
     public var errorCount: Int { errors.count }
@@ -462,7 +507,9 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
         entries: [Entry],
         errors: [Error],
         mode: MergeMode = .quarantine,
-        status: TransactionStatus = .completed
+        status: TransactionStatus = .completed,
+        sessionId: UUID? = nil,
+        groupIds: [UUID]? = nil
     ) {
         self.id = id
         self.date = date
@@ -470,6 +517,8 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
         self.errors = errors
         self.mode = mode
         self.status = status
+        self.sessionId = sessionId
+        self.groupIds = groupIds
     }
 
     public struct Entry: Codable, Sendable {
@@ -507,10 +556,42 @@ public enum MergeMode: String, Codable, Sendable {
     case trash
 }
 
-public enum TransactionStatus: String, Codable, Sendable {
+public enum TransactionStatus: Sendable, Equatable {
     case planned
     case completed
     case failed
+    case undone
+    /// Unknown status from a newer version. Preserves the raw
+    /// string for round-trip fidelity; treated as completed for
+    /// forward compatibility (undo-eligible, not silently lost).
+    case unknown(String)
+}
+
+extension TransactionStatus: Codable {
+    private static let knownValues: [String: TransactionStatus] = [
+        "planned": .planned,
+        "completed": .completed,
+        "failed": .failed,
+        "undone": .undone,
+    ]
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(
+            String.self
+        )
+        self = Self.knownValues[raw] ?? .unknown(raw)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .planned: try container.encode("planned")
+        case .completed: try container.encode("completed")
+        case .failed: try container.encode("failed")
+        case .undone: try container.encode("undone")
+        case .unknown(let raw): try container.encode(raw)
+        }
+    }
 }
 
 // MARK: - MergeError

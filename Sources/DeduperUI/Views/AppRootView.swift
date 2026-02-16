@@ -139,6 +139,10 @@ public struct AppRootView: View {
                 sessionId: sessionId,
                 context: modelContext
             )
+            mergeVM.loadPersistedTransaction(
+                for: sessionId,
+                container: modelContext.container
+            )
             // Resume: auto-select first undecided if partial progress
             if groupVM.reviewedCount > 0,
                groupVM.reviewedCount < groupVM.totalGroups {

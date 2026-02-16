@@ -1146,6 +1146,306 @@ struct MergeViewModelTests {
         #expect(callbackStates == [.merged, .approved])
     }
 
+    @Test("Execute writes sessionId into transaction on disk")
+    @MainActor
+    func executeWritesSessionIdToDisk() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // Read transaction from disk
+        let txs = try MergeService().listTransactions(
+            logDirectory: logDir
+        )
+        let completed = txs.first { $0.status == .completed }
+        #expect(completed?.sessionId == s.sessionId)
+    }
+
+    @Test("Load persisted transaction restores undo affordance")
+    @MainActor
+    func loadPersistedTransactionRestoresUndo() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        // First VM: merge and complete
+        let vm1 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm1.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm1)
+        guard case .preview(let plan) = vm1.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+        vm1.execute(plan: plan, container: s.container)
+        await waitForExecution(vm1)
+        guard case .completed = vm1.phase else {
+            Issue.record("Expected completed phase")
+            return
+        }
+
+        // Second VM: simulates app restart
+        let vm2 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm2.loadPersistedTransaction(
+            for: s.sessionId, container: s.container
+        )
+
+        // Should have loaded the transaction
+        #expect(vm2.lastTransaction != nil)
+        #expect(vm2.lastMergedSessionId == s.sessionId)
+    }
+
+    @Test("Load persisted transaction ignores wrong session")
+    @MainActor
+    func loadPersistedTransactionIgnoresWrongSession() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm1 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm1.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm1)
+        guard case .preview(let plan) = vm1.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+        vm1.execute(plan: plan, container: s.container)
+        await waitForExecution(vm1)
+
+        // Different session ID → no transaction loaded
+        let vm2 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm2.loadPersistedTransaction(
+            for: UUID(), container: s.container
+        )
+        #expect(vm2.lastTransaction == nil)
+    }
+
+    @Test("Transaction groupIds scopes undo correctly")
+    @MainActor
+    func transactionGroupIdsScope() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // Verify groupIds written to disk match plan
+        let txs = try MergeService().listTransactions(
+            logDirectory: logDir
+        )
+        let completed = txs.first { $0.status == .completed }
+        #expect(completed?.groupIds == [s.groupIds[0]])
+
+        // Load from disk — should use transaction.groupIds,
+        // not query all merged decisions
+        let vm2 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm2.loadPersistedTransaction(
+            for: s.sessionId, container: s.container
+        )
+        #expect(vm2.lastTransaction != nil)
+    }
+
+    @Test("Undo marks transaction as undone on disk")
+    @MainActor
+    func undoMarksTransactionUndone() async throws {
+        let s = try makeScenario(groupCount: 1, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        vm.undoLastTransaction()
+        try await Task.sleep(for: .milliseconds(500))
+
+        // Transaction on disk should be marked undone
+        let txs = try MergeService().listTransactions(
+            logDirectory: logDir
+        )
+        let match = txs.first { $0.sessionId == s.sessionId }
+        #expect(match?.status == .undone)
+
+        // Second VM should NOT load undone transaction
+        let vm2 = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm2.loadPersistedTransaction(
+            for: s.sessionId, container: s.container
+        )
+        #expect(vm2.lastTransaction == nil)
+    }
+
+    @Test("Empty plan reports no approved decisions reason")
+    @MainActor
+    func emptyPlanNoApprovedDecisions() async throws {
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let context = ModelContext(container)
+        let sessionId = UUID()
+        let runId = UUID()
+
+        let session = SessionIndex(
+            sessionId: sessionId,
+            directoryPath: "/tmp",
+            startedAt: Date(),
+            totalFiles: 10,
+            mediaFiles: 5,
+            duplicateGroups: 0,
+            artifactPath: "/tmp/a.ndjson.gz",
+            manifestPath: "/tmp/a.manifest.json"
+        )
+        session.currentRunId = runId
+        context.insert(session)
+        try context.save()
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        #expect(plan.items.isEmpty)
+        if case .noApprovedDecisions = plan.emptyReason {
+            // correct
+        } else {
+            Issue.record(
+                "Expected noApprovedDecisions, got \(String(describing: plan.emptyReason))"
+            )
+        }
+    }
+
+    @Test("Empty plan reports all already merged reason")
+    @MainActor
+    func emptyPlanAllAlreadyMerged() async throws {
+        let s = try makeScenario(groupCount: 2, membersPerGroup: 2)
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        // Second run: all merged
+        vm.reset()
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan2) = vm.phase else {
+            Issue.record("Expected preview phase on second run")
+            return
+        }
+
+        #expect(plan2.items.isEmpty)
+        if case .allAlreadyMerged(let count) = plan2.emptyReason {
+            #expect(count == 2)
+        } else {
+            Issue.record(
+                "Expected allAlreadyMerged, got \(String(describing: plan2.emptyReason))"
+            )
+        }
+    }
+
     @Test("Session ID stored for undo session guard")
     @MainActor
     func sessionIdStoredForUndoGuard() async throws {

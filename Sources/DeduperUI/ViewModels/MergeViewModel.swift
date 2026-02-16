@@ -71,11 +71,21 @@ public struct MergePlanItem: Identifiable, Sendable {
     }
 }
 
+/// Why the merge plan is empty. Computed during validation where
+/// SwiftData context is available — not inferred in the view.
+public enum MergeEmptyReason: Sendable {
+    case noApprovedDecisions
+    case allAlreadyMerged(count: Int)
+    case allSkippedDuringValidation
+}
+
 /// Complete validated merge plan.
 public struct MergePlan: Sendable {
     public let items: [MergePlanItem]
     public let skippedGroups: [MergeValidationWarning]
     public let missingNonKeeperCount: Int
+    /// Non-nil when `items.isEmpty`, explains why.
+    public let emptyReason: MergeEmptyReason?
 
     public var totalAssetBundles: Int {
         items.reduce(0) { $0 + $1.nonKeeperBundles.count }
@@ -164,7 +174,11 @@ public final class MergeViewModel {
                 try Task.checkCancellation()
 
                 // Phase 2: build plan off-main
-                let plan = try await buildPlan(from: snapshot)
+                let plan = try await buildPlan(
+                    from: snapshot,
+                    mergedDecisionCount:
+                        snapshot.mergedDecisionCount
+                )
 
                 try Task.checkCancellation()
 
@@ -201,16 +215,19 @@ public final class MergeViewModel {
                     return
                 }
 
+                let sid = lastMergedSessionId
+                let mergedIds = plan.items.map(\.id)
                 let transaction = try await Task.detached {
                     try MergeService().moveToQuarantine(
                         assets: assets,
+                        sessionId: sid,
+                        groupIds: mergedIds,
                         logDirectory: self.logDirectory,
                         quarantineRoot: self.quarantineRoot
                     )
                 }.value
 
                 lastTransaction = transaction
-                let mergedIds = plan.items.map(\.id)
                 lastMergedGroupIds = mergedIds
 
                 // Only transition to .merged when execution
@@ -248,12 +265,22 @@ public final class MergeViewModel {
     public func undoLastTransaction() {
         guard let transaction = lastTransaction else { return }
 
+        let logDir = self.logDirectory
         Task {
             let failures = await Task.detached {
                 MergeService().undo(transaction: transaction)
             }.value
 
             if failures.isEmpty {
+                // Mark transaction as undone on disk — awaited so
+                // the persisted state transitions atomically with
+                // the in-memory and SwiftData transitions.
+                await Task.detached {
+                    try? MergeService().markUndone(
+                        transaction: transaction,
+                        logDirectory: logDir
+                    )
+                }.value
                 // Reverse .merged → .approved in SwiftData
                 if let container = lastContainer {
                     transitionToApproved(
@@ -278,6 +305,54 @@ public final class MergeViewModel {
         validateTask?.cancel()
         executeTask?.cancel()
         phase = .idle
+    }
+
+    // MARK: - Persisted Undo
+
+    /// Load a persisted transaction from disk for the given session.
+    /// Called on session selection to restore undo affordance across
+    /// app launches. Uses `transaction.groupIds` to scope undo to
+    /// exactly the groups merged in that operation.
+    public func loadPersistedTransaction(
+        for sessionId: UUID,
+        container: ModelContainer
+    ) {
+        // Don't overwrite an in-memory transaction from the
+        // current session (already more up-to-date).
+        if lastTransaction != nil,
+           lastMergedSessionId == sessionId {
+            return
+        }
+
+        do {
+            let transactions = try MergeService()
+                .listTransactions(logDirectory: logDirectory)
+
+            // Find newest completed transaction for this session
+            guard let match = transactions.first(where: {
+                $0.sessionId == sessionId
+                    && $0.status == .completed
+            }) else { return }
+
+            // Validate: at least one quarantine file still exists
+            let hasUndoableEntry = match.entries.contains {
+                guard let tp = $0.trashedPath else { return false }
+                return FileManager.default.fileExists(atPath: tp)
+            }
+            guard hasUndoableEntry else { return }
+
+            lastTransaction = match
+            lastMergedSessionId = sessionId
+            lastContainer = container
+
+            // Use transaction-scoped group IDs (not "all merged
+            // in session") to prevent cross-transaction corruption.
+            lastMergedGroupIds = match.groupIds
+        } catch {
+            Self.logger.error(
+                "Failed to load persisted transaction: \(error)"
+            )
+        }
     }
 
     // MARK: - Decision Transitions
@@ -351,6 +426,8 @@ public final class MergeViewModel {
     /// Sendable snapshot of all data needed to build a merge plan.
     private struct MergeInputSnapshot: Sendable {
         let groups: [GroupSnapshot]
+        /// Count of merged decisions (for empty-reason reporting).
+        let mergedDecisionCount: Int
     }
 
     private struct GroupSnapshot: Sendable {
@@ -441,13 +518,26 @@ public final class MergeViewModel {
             ))
         }
 
-        return MergeInputSnapshot(groups: groups)
+        // Count merged decisions for empty-reason reporting
+        let mergedRaw = DecisionState.merged.rawValue
+        let mergedPred = #Predicate<ReviewDecision> {
+            $0.sessionId == sid && $0.decisionStateRaw == mergedRaw
+        }
+        let mergedCount = (try? context.fetchCount(
+            FetchDescriptor<ReviewDecision>(predicate: mergedPred)
+        )) ?? 0
+
+        return MergeInputSnapshot(
+            groups: groups,
+            mergedDecisionCount: mergedCount
+        )
     }
 
     // MARK: - Private: Build plan (off-main)
 
     private nonisolated func buildPlan(
-        from snapshot: MergeInputSnapshot
+        from snapshot: MergeInputSnapshot,
+        mergedDecisionCount: Int
     ) async throws -> MergePlan {
         var items: [MergePlanItem] = []
         var skipped: [MergeValidationWarning] = []
@@ -569,10 +659,31 @@ public final class MergeViewModel {
             }
         }
 
+        let sortedItems = items.sorted {
+            $0.groupIndex < $1.groupIndex
+        }
+
+        // Compute empty reason when no actionable items
+        let emptyReason: MergeEmptyReason?
+        if sortedItems.isEmpty {
+            if snapshot.groups.isEmpty && mergedDecisionCount > 0 {
+                emptyReason = .allAlreadyMerged(
+                    count: mergedDecisionCount
+                )
+            } else if snapshot.groups.isEmpty {
+                emptyReason = .noApprovedDecisions
+            } else {
+                emptyReason = .allSkippedDuringValidation
+            }
+        } else {
+            emptyReason = nil
+        }
+
         return MergePlan(
-            items: items.sorted { $0.groupIndex < $1.groupIndex },
+            items: sortedItems,
             skippedGroups: skipped,
-            missingNonKeeperCount: missingNonKeeperTotal
+            missingNonKeeperCount: missingNonKeeperTotal,
+            emptyReason: emptyReason
         )
     }
 
@@ -671,10 +782,7 @@ public final class MergeViewModel {
     // MARK: - Helpers
 
     private nonisolated func canonicalize(_ path: String) -> String {
-        URL(fileURLWithPath: path)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-            .path
+        PathIdentity.canonical(path)
     }
 
     /// Duplicates MergeService's protected path check for early

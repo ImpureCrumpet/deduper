@@ -381,3 +381,28 @@ extension MediaMetadata {
         return 0.0
     }
 }
+
+// MARK: - Path Identity
+
+/// Canonical path identity for comparisons. Separates "identity"
+/// (canonical string for set membership, cache keys, equality checks)
+/// from "access" (original URL for file operations and security-scoped
+/// access). Use `canonical()` for comparisons; keep the original URL
+/// for `FileManager` operations.
+public enum PathIdentity {
+    /// Canonical path string for identity comparisons.
+    public static func canonical(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// Canonical path string from a path string.
+    public static func canonical(_ path: String) -> String {
+        canonical(URL(fileURLWithPath: path))
+    }
+
+    /// Canonicalize a URL for use as an enumeration root.
+    /// Resolves symlinks so children inherit the canonical namespace.
+    public static func canonicalRoot(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+}

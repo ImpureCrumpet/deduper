@@ -55,9 +55,10 @@ public struct ScanService: Sendable {
         var errorCount = 0
 
         for directory in directories {
+            let canonicalDir = PathIdentity.canonicalRoot(directory)
             let fileURLs: [URL] = {
                 let enumerator = FileManager.default.enumerator(
-                    at: directory,
+                    at: canonicalDir,
                     includingPropertiesForKeys: [
                         .isRegularFileKey,
                         .fileSizeKey,

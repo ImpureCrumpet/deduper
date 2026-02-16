@@ -366,7 +366,7 @@ public struct DetectionService: Sendable {
                         // Fallback: path-based lookup
                         let mtime = Self.modificationDate(of: file.url)
                         if let cached = await cache.lookup(
-                            path: file.url.path,
+                            path: PathIdentity.canonical(file.url),
                             fileSize: file.fileSize,
                             modifiedAt: mtime
                         ) {
@@ -394,7 +394,7 @@ public struct DetectionService: Sendable {
                             for: file.url
                         )
                         await cache.store(
-                            path: file.url.path,
+                            path: PathIdentity.canonical(file.url),
                             fileSize: file.fileSize,
                             modifiedAt: mtime,
                             hashes: hashes.map {

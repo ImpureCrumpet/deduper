@@ -439,7 +439,9 @@ public actor HashCacheService {
         }
     }
 
-    /// Look up cached hashes for a file. Returns nil if file has changed.
+    /// Look up cached hashes for a file. Returns nil if file has
+    /// changed. Tries canonical path first; on miss, falls back to
+    /// legacy raw path and migrates the record on hit.
     @MainActor
     public func lookup(
         path: String,
@@ -447,6 +449,47 @@ public actor HashCacheService {
         modifiedAt: Date?
     ) -> [CachedHash]? {
         let context = ModelContext(container)
+
+        // Primary lookup by canonical path
+        if let result = lookupByPath(
+            path, fileSize: fileSize, modifiedAt: modifiedAt,
+            context: context
+        ) {
+            return result
+        }
+
+        // Legacy fallback: try raw (non-canonical) path.
+        // This handles cache entries written before path
+        // canonicalization was introduced.
+        let rawPath = URL(fileURLWithPath: path).path
+        if rawPath != path,
+           let result = lookupByPath(
+               rawPath, fileSize: fileSize, modifiedAt: modifiedAt,
+               context: context
+           ) {
+            // Migrate: update records to canonical path
+            let legacyPred = #Predicate<HashedFile> {
+                $0.filePath == rawPath
+            }
+            if let rows = try? context.fetch(
+                FetchDescriptor<HashedFile>(predicate: legacyPred)
+            ) {
+                for row in rows { row.filePath = path }
+                try? context.save()
+            }
+            return result
+        }
+
+        return nil
+    }
+
+    @MainActor
+    private func lookupByPath(
+        _ path: String,
+        fileSize: Int64,
+        modifiedAt: Date?,
+        context: ModelContext
+    ) -> [CachedHash]? {
         let predicate = #Predicate<HashedFile> {
             $0.filePath == path
         }

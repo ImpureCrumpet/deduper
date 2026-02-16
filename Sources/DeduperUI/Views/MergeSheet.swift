@@ -76,61 +76,116 @@ public struct MergeSheet: View {
 
     private func previewContent(plan: MergePlan) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Summary header
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Merges all approved decisions for this session")
+            if plan.items.isEmpty {
+                emptyPlanContent(plan: plan)
+            } else {
+                // Summary header
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(
+                        "Merges all approved decisions"
+                            + " for this session"
+                    )
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 16) {
-                    Label(
-                        "\(plan.items.count) groups",
-                        systemImage: "square.stack.3d.up"
-                    )
-                    Label(
-                        "\(plan.totalFiles) files",
-                        systemImage: "doc"
-                    )
-                    if plan.companionCount > 0 {
+                    HStack(spacing: 16) {
                         Label(
-                            "+ \(plan.companionCount) companions",
-                            systemImage: "paperclip"
+                            "\(plan.items.count) groups",
+                            systemImage: "square.stack.3d.up"
                         )
+                        Label(
+                            "\(plan.totalFiles) files",
+                            systemImage: "doc"
+                        )
+                        if plan.companionCount > 0 {
+                            Label(
+                                "+ \(plan.companionCount) companions",
+                                systemImage: "paperclip"
+                            )
+                        }
+                    }
+                    .font(.headline)
+
+                    if plan.missingNonKeeperCount > 0 {
+                        Label(
+                            "\(plan.missingNonKeeperCount) file(s)"
+                                + " already missing, will be skipped",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                     }
                 }
-                .font(.headline)
+                .padding()
 
-                if plan.missingNonKeeperCount > 0 {
-                    Label(
-                        "\(plan.missingNonKeeperCount) file(s)"
-                            + " already missing, will be skipped",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                Divider()
+
+                // Plan items + warnings
+                List {
+                    if !plan.skippedGroups.isEmpty {
+                        Section("Skipped Groups") {
+                            ForEach(plan.skippedGroups) { warning in
+                                warningRow(warning)
+                            }
+                        }
+                    }
+
+                    Section("Groups to Merge") {
+                        ForEach(plan.items) { item in
+                            planItemRow(item)
+                        }
+                    }
                 }
+                .listStyle(.inset)
             }
-            .padding()
+        }
+    }
 
-            Divider()
+    private func emptyPlanContent(
+        plan: MergePlan
+    ) -> some View {
+        VStack(spacing: 0) {
+            Spacer()
+            ContentUnavailableView {
+                Label(
+                    "Nothing to Merge",
+                    systemImage: "checkmark.seal"
+                )
+            } description: {
+                Text(emptyPlanExplanation(plan.emptyReason))
+            }
+            Spacer()
 
-            // Plan items + warnings
-            List {
-                if !plan.skippedGroups.isEmpty {
+            if !plan.skippedGroups.isEmpty {
+                Divider()
+                List {
                     Section("Skipped Groups") {
                         ForEach(plan.skippedGroups) { warning in
                             warningRow(warning)
                         }
                     }
                 }
-
-                Section("Groups to Merge") {
-                    ForEach(plan.items) { item in
-                        planItemRow(item)
-                    }
-                }
+                .listStyle(.inset)
+                .frame(maxHeight: 150)
             }
-            .listStyle(.inset)
+        }
+    }
+
+    private func emptyPlanExplanation(
+        _ reason: MergeEmptyReason?
+    ) -> String {
+        switch reason {
+        case .noApprovedDecisions:
+            "No approved decisions found."
+                + " Review and approve groups first."
+        case .allAlreadyMerged(let count):
+            "All \(count) approved group(s) have already been"
+                + " merged."
+        case .allSkippedDuringValidation:
+            "All groups were skipped during validation."
+                + " Check warnings below for details."
+        case nil:
+            "No actionable groups found for this session."
         }
     }
 
@@ -325,16 +380,19 @@ public struct MergeSheet: View {
 
             case .preview(let plan):
                 Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Merge \(plan.totalFiles) Files") {
-                    viewModel.execute(
-                        plan: plan,
-                        container: modelContainer
-                    )
+                if plan.items.isEmpty {
+                    Button("Close") { dismiss() }
+                } else {
+                    Button("Cancel") { dismiss() }
+                    Button("Merge \(plan.totalFiles) Files") {
+                        viewModel.execute(
+                            plan: plan,
+                            container: modelContainer
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .disabled(plan.items.isEmpty)
 
             case .executing:
                 Spacer()

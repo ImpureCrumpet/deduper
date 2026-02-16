@@ -270,6 +270,176 @@ struct MergeServiceTests {
         }
     }
 
+    @Test("Transaction stores sessionId when provided")
+    func transactionStoresSessionId() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("session-test.jpg")
+        try Data("content".utf8).write(to: file)
+        let sessionId = UUID()
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            sessionId: sessionId,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        #expect(transaction.sessionId == sessionId)
+
+        // Persisted log also has sessionId
+        let loaded = try service.listTransactions(
+            logDirectory: logDir
+        )
+        #expect(loaded.count == 1)
+        #expect(loaded[0].sessionId == sessionId)
+    }
+
+    @Test("Transaction without sessionId decodes as nil")
+    func transactionWithoutSessionIdDecodesNil() throws {
+        let transaction = MergeTransaction(
+            id: UUID(),
+            date: Date(),
+            entries: [],
+            errors: []
+        )
+        let data = try JSONEncoder().encode(transaction)
+        let decoded = try JSONDecoder().decode(
+            MergeTransaction.self, from: data
+        )
+        #expect(decoded.sessionId == nil)
+    }
+
+    @Test("markUndone rewrites transaction with undone status")
+    func markUndoneRewritesStatus() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("undo-mark.jpg")
+        try Data("content".utf8).write(to: file)
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+        #expect(transaction.status == .completed)
+
+        try service.markUndone(
+            transaction: transaction,
+            logDirectory: logDir
+        )
+
+        // Re-read from disk
+        let all = try service.listTransactions(
+            logDirectory: logDir
+        )
+        let updated = all.first { $0.id == transaction.id }
+        #expect(updated?.status == .undone)
+        // Entries preserved for audit
+        #expect(updated?.entries.count == transaction.entries.count)
+    }
+
+    @Test("Transaction stores groupIds when provided")
+    func transactionStoresGroupIds() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("groups-test.jpg")
+        try Data("content".utf8).write(to: file)
+        let groupIds = [UUID(), UUID()]
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            groupIds: groupIds,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        #expect(transaction.groupIds == groupIds)
+
+        // Persisted log also has groupIds
+        let loaded = try service.listTransactions(
+            logDirectory: logDir
+        )
+        #expect(loaded.first?.groupIds == groupIds)
+    }
+
+    @Test("Forward-compatible decoding: unknown status")
+    func forwardCompatibleDecoding() throws {
+        // Simulate a transaction log from a future version with
+        // an unknown status value
+        let json = """
+        {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "date": 0,
+            "entries": [],
+            "errors": [],
+            "mode": "quarantine",
+            "status": "archived"
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(
+            MergeTransaction.self, from: json
+        )
+
+        // Should decode as .unknown, not throw
+        if case .unknown(let raw) = decoded.status {
+            #expect(raw == "archived")
+        } else {
+            Issue.record(
+                "Expected .unknown, got \(decoded.status)"
+            )
+        }
+
+        // Round-trip preserves the raw value
+        let reEncoded = try JSONEncoder().encode(decoded)
+        let reDecoded = try JSONDecoder().decode(
+            MergeTransaction.self, from: reEncoded
+        )
+        if case .unknown(let raw) = reDecoded.status {
+            #expect(raw == "archived")
+        } else {
+            Issue.record("Round-trip lost unknown status")
+        }
+    }
+
+    @Test("markUndone preserves groupIds in rewritten log")
+    func markUndonePreservesGroupIds() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("preserve-ids.jpg")
+        try Data("content".utf8).write(to: file)
+        let groupIds = [UUID(), UUID()]
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            groupIds: groupIds,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        try service.markUndone(
+            transaction: transaction, logDirectory: logDir
+        )
+
+        let all = try service.listTransactions(logDirectory: logDir)
+        let updated = all.first { $0.id == transaction.id }
+        #expect(updated?.status == .undone)
+        #expect(updated?.groupIds == groupIds)
+    }
+
     @Test("Companion files are moved with primary")
     func companionsMoveWithPrimary() throws {
         let dir = try makeTempDir()
