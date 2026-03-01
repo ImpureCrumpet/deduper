@@ -40,10 +40,20 @@ struct Undo: AsyncParsableCommand {
             )
         }
 
+        guard transaction.status.isStatusUndoEligible else {
+            let reason = transaction.status == .undone
+                ? "undone" : "purged"
+            throw ValidationError(
+                "Transaction \(uuid.uuidString) has already"
+                + " been \(reason)."
+            )
+        }
+
         print("Restoring \(transaction.filesMoved) file(s)...")
         let failures = merger.undo(transaction: transaction)
 
         if failures.isEmpty {
+            try merger.markUndone(transaction: transaction)
             print("All files restored successfully.")
         } else {
             let restored = transaction.filesMoved - failures.count

@@ -173,6 +173,33 @@ public struct MergeService: Sendable {
         )
     }
 
+    /// Mark a transaction as purged by rewriting its log file with
+    /// `.purged` status. Also appends a journal entry.
+    public func markPurged(
+        transaction: MergeTransaction,
+        logDirectory: URL? = nil
+    ) throws {
+        let logDir = logDirectory ?? defaultLogDirectory()
+        let updated = MergeTransaction(
+            id: transaction.id,
+            date: transaction.date,
+            entries: transaction.entries,
+            errors: transaction.errors,
+            mode: transaction.mode,
+            status: .purged,
+            sessionId: transaction.sessionId,
+            groupIds: transaction.groupIds
+        )
+        try writeTransactionLog(updated, to: logDir)
+
+        let journalPath = logDir.appendingPathComponent(
+            "merge-\(transaction.id.uuidString).journal.ndjson"
+        )
+        try writeJournalEntry(
+            "purged", txId: transaction.id, to: journalPath
+        )
+    }
+
     /// Legacy: move files to OS Trash (for --use-trash flag).
     public func moveToTrash(
         files: [URL],
@@ -290,6 +317,9 @@ public struct MergeService: Sendable {
         transaction: MergeTransaction,
         logDirectory: URL? = nil
     ) throws -> Int {
+        guard transaction.status != .undone else {
+            throw MergeError.cannotPurgeUndone(transaction.id)
+        }
         var deleted = 0
         for entry in transaction.entries {
             guard let trashedPath = entry.trashedPath else { continue }
@@ -561,6 +591,7 @@ public enum TransactionStatus: Sendable, Equatable {
     case completed
     case failed
     case undone
+    case purged
     /// Unknown status from a newer version. Preserves the raw
     /// string for round-trip fidelity; treated as completed for
     /// forward compatibility (undo-eligible, not silently lost).
@@ -573,6 +604,7 @@ extension TransactionStatus: Codable {
         "completed": .completed,
         "failed": .failed,
         "undone": .undone,
+        "purged": .purged,
     ]
 
     public init(from decoder: Decoder) throws {
@@ -589,7 +621,20 @@ extension TransactionStatus: Codable {
         case .completed: try container.encode("completed")
         case .failed: try container.encode("failed")
         case .undone: try container.encode("undone")
+        case .purged: try container.encode("purged")
         case .unknown(let raw): try container.encode(raw)
+        }
+    }
+}
+
+extension TransactionStatus {
+    /// Status-only undo check. Not sufficient for full eligibility
+    /// — use MergeViewModel.isUndoEligible() for UI gating which
+    /// also checks groupIds, filesystem existence, etc.
+    public var isStatusUndoEligible: Bool {
+        switch self {
+        case .completed, .unknown: true
+        case .planned, .failed, .undone, .purged: false
         }
     }
 }
@@ -600,6 +645,7 @@ public enum MergeError: Swift.Error, LocalizedError, Sendable {
     case protectedPath(URL)
     case transactionNotFound(UUID)
     case undoFailed([String])
+    case cannotPurgeUndone(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -609,6 +655,8 @@ public enum MergeError: Swift.Error, LocalizedError, Sendable {
             return "Transaction not found: \(id)"
         case .undoFailed(let reasons):
             return "Undo failed for \(reasons.count) file(s)"
+        case .cannotPurgeUndone(let id):
+            return "Cannot purge undone transaction: \(id)"
         }
     }
 }

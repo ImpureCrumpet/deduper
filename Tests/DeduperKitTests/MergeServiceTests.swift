@@ -477,4 +477,109 @@ struct MergeServiceTests {
         }
         #expect(companionEntries.count == 1)
     }
+
+    // MARK: - TransactionStatus.isStatusUndoEligible
+
+    @Test("isStatusUndoEligible: completed is true")
+    func isStatusUndoEligibleCompleted() {
+        #expect(TransactionStatus.completed.isStatusUndoEligible)
+    }
+
+    @Test("isStatusUndoEligible: unknown is true")
+    func isStatusUndoEligibleUnknown() {
+        #expect(
+            TransactionStatus.unknown("future").isStatusUndoEligible
+        )
+    }
+
+    @Test("isStatusUndoEligible: undone is false")
+    func isStatusUndoEligibleUndone() {
+        #expect(!TransactionStatus.undone.isStatusUndoEligible)
+    }
+
+    @Test("isStatusUndoEligible: purged is false")
+    func isStatusUndoEligiblePurged() {
+        #expect(!TransactionStatus.purged.isStatusUndoEligible)
+    }
+
+    // MARK: - markPurged + purge guards
+
+    @Test("markPurged writes purged status to disk")
+    func markPurgedWritesStatus() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("purge-status.jpg")
+        try Data("content".utf8).write(to: file)
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        try service.markPurged(
+            transaction: transaction, logDirectory: logDir
+        )
+
+        let all = try service.listTransactions(
+            logDirectory: logDir
+        )
+        let updated = all.first { $0.id == transaction.id }
+        #expect(updated?.status == .purged)
+    }
+
+    @Test("Purged status round-trips through Codable")
+    func purgedRoundTrips() throws {
+        let transaction = MergeTransaction(
+            id: UUID(),
+            date: Date(),
+            entries: [],
+            errors: [],
+            status: .purged
+        )
+
+        let data = try JSONEncoder().encode(transaction)
+        let decoded = try JSONDecoder().decode(
+            MergeTransaction.self, from: data
+        )
+        #expect(decoded.status == .purged)
+    }
+
+    @Test("Purge refuses undone transaction")
+    func purgeRefusesUndone() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("refuse-test.jpg")
+        try Data("content".utf8).write(to: file)
+
+        let transaction = try service.moveToQuarantine(
+            assets: [AssetBundle(primary: file)],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Mark as undone
+        try service.markUndone(
+            transaction: transaction, logDirectory: logDir
+        )
+
+        // Re-read the undone transaction
+        let all = try service.listTransactions(
+            logDirectory: logDir
+        )
+        let undone = all.first { $0.id == transaction.id }!
+
+        // Purge should throw
+        #expect(throws: MergeError.self) {
+            _ = try service.purge(
+                transaction: undone, logDirectory: logDir
+            )
+        }
+    }
 }

@@ -54,14 +54,16 @@ public struct AppRootView: View {
                 }
             }
             ToolbarItem(placement: .automatic) {
-                if let tx = mergeVM.lastTransaction,
+                if mergeVM.canUndo,
                    mergeVM.lastMergedSessionId
                        == sessionVM.selectedSessionId {
                     Button {
                         mergeVM.undoLastTransaction()
                     } label: {
+                        let count = mergeVM.lastTransaction?
+                            .filesMoved ?? 0
                         Label(
-                            "Undo Merge (\(tx.filesMoved) files)",
+                            "Undo Merge (\(count) files)",
                             systemImage: "arrow.uturn.backward"
                         )
                     }

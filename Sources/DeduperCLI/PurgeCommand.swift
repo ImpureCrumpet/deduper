@@ -36,11 +36,21 @@ struct Purge: AsyncParsableCommand {
             )
         }
 
+        guard transaction.status.isStatusUndoEligible else {
+            let reason = transaction.status == .undone
+                ? "undone" : "purged"
+            throw ValidationError(
+                "Transaction \(uuid.uuidString) has already"
+                + " been \(reason) and cannot be purged."
+            )
+        }
+
         print(
             "Permanently deleting \(transaction.filesMoved)"
             + " quarantined file(s)..."
         )
         let deleted = try merger.purge(transaction: transaction)
+        try merger.markPurged(transaction: transaction)
 
         print("Deleted \(deleted) file(s).")
     }

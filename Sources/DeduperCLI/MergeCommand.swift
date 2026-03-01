@@ -196,6 +196,8 @@ struct Merge: AsyncParsableCommand {
 
         let merger = MergeService()
 
+        let groupIds = selectedGroups.map(\.groupId)
+
         if useTrash {
             let fileURLs = assets.flatMap(\.allFiles)
             let transaction = try merger.moveToTrash(
@@ -204,7 +206,9 @@ struct Merge: AsyncParsableCommand {
             printResult(transaction)
         } else {
             let transaction = try merger.moveToQuarantine(
-                assets: assets
+                assets: assets,
+                sessionId: uuid,
+                groupIds: groupIds
             )
             printResult(transaction)
         }

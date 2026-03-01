@@ -178,6 +178,36 @@ struct MergeViewModelTests {
         }
     }
 
+    /// Wait for undo to complete (phase becomes .idle or .undoFailed).
+    @MainActor
+    private func waitForUndo(
+        _ vm: MergeViewModel,
+        timeout: Double = 5.0
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch vm.phase {
+            case .idle, .undoFailed:
+                return
+            default:
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    /// Wait for a persisted transaction to load (or timeout).
+    @MainActor
+    private func waitForLoad(
+        _ vm: MergeViewModel,
+        timeout: Double = 5.0
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if vm.lastTransaction != nil { return }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     // MARK: - Validation Tests
 
     @Test("Validate produces plan from approved decisions")
@@ -725,7 +755,7 @@ struct MergeViewModelTests {
 
         vm.undoLastTransaction()
         // Wait for undo (also uses Task internally)
-        try await Task.sleep(for: .milliseconds(500))
+        await waitForUndo(vm)
 
         // File should be restored
         #expect(FileManager.default.fileExists(
@@ -775,7 +805,7 @@ struct MergeViewModelTests {
         )
 
         vm.undoLastTransaction()
-        try await Task.sleep(for: .milliseconds(500))
+        await waitForUndo(vm)
 
         // Should be undoFailed with transaction preserved
         if case .undoFailed(let failures, let keptTx) = vm.phase {
@@ -944,7 +974,7 @@ struct MergeViewModelTests {
 
         // Undo
         vm.undoLastTransaction()
-        try await Task.sleep(for: .milliseconds(500))
+        await waitForUndo(vm)
 
         // Verify reverted to approved
         decision = try context.fetch(desc).first
@@ -1140,7 +1170,7 @@ struct MergeViewModelTests {
         #expect(callbackStates == [.merged])
 
         vm.undoLastTransaction()
-        try await Task.sleep(for: .milliseconds(500))
+        await waitForUndo(vm)
 
         // Second callback: .approved (not toggled from snapshot)
         #expect(callbackStates == [.merged, .approved])
@@ -1220,6 +1250,7 @@ struct MergeViewModelTests {
         vm2.loadPersistedTransaction(
             for: s.sessionId, container: s.container
         )
+        await waitForLoad(vm2)
 
         // Should have loaded the transaction
         #expect(vm2.lastTransaction != nil)
@@ -1259,6 +1290,8 @@ struct MergeViewModelTests {
         vm2.loadPersistedTransaction(
             for: UUID(), container: s.container
         )
+        // Wait for async load to complete (expect no match)
+        try await Task.sleep(for: .milliseconds(200))
         #expect(vm2.lastTransaction == nil)
     }
 
@@ -1304,6 +1337,7 @@ struct MergeViewModelTests {
         vm2.loadPersistedTransaction(
             for: s.sessionId, container: s.container
         )
+        await waitForLoad(vm2)
         #expect(vm2.lastTransaction != nil)
     }
 
@@ -1334,7 +1368,7 @@ struct MergeViewModelTests {
         await waitForExecution(vm)
 
         vm.undoLastTransaction()
-        try await Task.sleep(for: .milliseconds(500))
+        await waitForUndo(vm)
 
         // Transaction on disk should be marked undone
         let txs = try MergeService().listTransactions(
@@ -1350,6 +1384,8 @@ struct MergeViewModelTests {
         vm2.loadPersistedTransaction(
             for: s.sessionId, container: s.container
         )
+        // Wait for async load to complete (expect no match)
+        try await Task.sleep(for: .milliseconds(200))
         #expect(vm2.lastTransaction == nil)
     }
 
@@ -1480,5 +1516,202 @@ struct MergeViewModelTests {
         // Session ID persists after execution
         #expect(vm.lastMergedSessionId == s.sessionId)
         #expect(vm.lastTransaction != nil)
+    }
+
+    // MARK: - Eligibility Gate Tests
+
+    @Test("Load persisted transaction accepts unknown status")
+    @MainActor
+    func loadPersistedAcceptsUnknownStatus() async throws {
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        try FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: quarDir, withIntermediateDirectories: true
+        )
+
+        let sessionId = UUID()
+        let txId = UUID()
+        let groupIds = [UUID()]
+
+        // Write a quarantine file so filesystem check passes
+        let qFile = quarDir
+            .appendingPathComponent(txId.uuidString)
+            .appendingPathComponent("test.jpg")
+        try FileManager.default.createDirectory(
+            at: qFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("content".utf8).write(to: qFile)
+
+        // Write transaction JSON with unknown status
+        let json = """
+        {
+            "id": "\(txId.uuidString)",
+            "date": 0,
+            "entries": [
+                {
+                    "originalPath": "/tmp/test.jpg",
+                    "trashedPath": "\(qFile.path)",
+                    "isCompanion": false,
+                    "status": "completed"
+                }
+            ],
+            "errors": [],
+            "mode": "quarantine",
+            "status": "future_v3",
+            "sessionId": "\(sessionId.uuidString)",
+            "groupIds": ["\(groupIds[0].uuidString)"]
+        }
+        """.data(using: .utf8)!
+        let logPath = logDir.appendingPathComponent(
+            "merge-\(txId.uuidString).json"
+        )
+        try json.write(to: logPath)
+
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.loadPersistedTransaction(
+            for: sessionId, container: container
+        )
+        await waitForLoad(vm)
+
+        // Unknown status is undo-eligible
+        #expect(vm.lastTransaction != nil)
+        #expect(vm.lastTransaction?.id == txId)
+    }
+
+    @Test("Load persisted transaction rejects nil groupIds")
+    @MainActor
+    func loadPersistedRejectsNilGroupIds() async throws {
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        try FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: quarDir, withIntermediateDirectories: true
+        )
+
+        let sessionId = UUID()
+        let txId = UUID()
+
+        // Quarantine file exists
+        let qFile = quarDir
+            .appendingPathComponent(txId.uuidString)
+            .appendingPathComponent("test.jpg")
+        try FileManager.default.createDirectory(
+            at: qFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("content".utf8).write(to: qFile)
+
+        // Transaction without groupIds (legacy CLI)
+        let json = """
+        {
+            "id": "\(txId.uuidString)",
+            "date": 0,
+            "entries": [
+                {
+                    "originalPath": "/tmp/test.jpg",
+                    "trashedPath": "\(qFile.path)",
+                    "isCompanion": false,
+                    "status": "completed"
+                }
+            ],
+            "errors": [],
+            "mode": "quarantine",
+            "status": "completed",
+            "sessionId": "\(sessionId.uuidString)"
+        }
+        """.data(using: .utf8)!
+        let logPath = logDir.appendingPathComponent(
+            "merge-\(txId.uuidString).json"
+        )
+        try json.write(to: logPath)
+
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.loadPersistedTransaction(
+            for: sessionId, container: container
+        )
+        // Wait for async load (expect no match)
+        try await Task.sleep(for: .milliseconds(200))
+
+        // Nil groupIds → scope unknown → not loaded
+        #expect(vm.lastTransaction == nil)
+    }
+
+    @Test("Load persisted rejects when quarantine files gone")
+    @MainActor
+    func loadPersistedRejectsGoneFiles() async throws {
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir) }
+
+        try FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true
+        )
+
+        let sessionId = UUID()
+        let txId = UUID()
+
+        // Transaction with valid groupIds but no quarantine files
+        let json = """
+        {
+            "id": "\(txId.uuidString)",
+            "date": 0,
+            "entries": [
+                {
+                    "originalPath": "/tmp/test.jpg",
+                    "trashedPath": "/tmp/nonexistent/q.jpg",
+                    "isCompanion": false,
+                    "status": "completed"
+                }
+            ],
+            "errors": [],
+            "mode": "quarantine",
+            "status": "completed",
+            "sessionId": "\(sessionId.uuidString)",
+            "groupIds": ["\(UUID().uuidString)"]
+        }
+        """.data(using: .utf8)!
+        let logPath = logDir.appendingPathComponent(
+            "merge-\(txId.uuidString).json"
+        )
+        try json.write(to: logPath)
+
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let vm = MergeViewModel(
+            logDirectory: logDir
+        )
+        vm.loadPersistedTransaction(
+            for: sessionId, container: container
+        )
+        // Wait for async load (expect no match)
+        try await Task.sleep(for: .milliseconds(200))
+
+        // No quarantine files exist → not loaded
+        #expect(vm.lastTransaction == nil)
     }
 }

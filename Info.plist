@@ -14,7 +14,7 @@
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleExecutable</key>
-    <string>Deduper</string>
+    <string>DeduperApp</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -30,12 +30,9 @@
     <key>NSDownloadsFolderUsageDescription</key>
     <string>Deduper needs access to scan your downloads for duplicate photos and videos.</string>
 
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>Deduper needs access to scan your downloads for duplicate photos and videos.</string>
-
     <!-- Minimum System Version -->
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>14.0</string>
 
     <!-- Application Category -->
     <key>LSApplicationCategoryType</key>

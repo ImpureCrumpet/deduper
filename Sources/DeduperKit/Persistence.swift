@@ -407,6 +407,9 @@ public final class HashedFile {
 /// falling back to path + size + mtime for migration.
 public actor HashCacheService {
     private let container: ModelContainer
+    private static let logger = Logger(
+        subsystem: "app.deduper", category: "hashcache"
+    )
 
     public init(container: ModelContainer) {
         self.container = container
@@ -460,8 +463,14 @@ public actor HashCacheService {
 
         // Legacy fallback: try raw (non-canonical) path.
         // This handles cache entries written before path
-        // canonicalization was introduced.
+        // canonicalization was introduced. Instrumented to
+        // determine if this path ever fires in practice.
         let rawPath = URL(fileURLWithPath: path).path
+        if rawPath != path {
+            Self.logger.debug(
+                "Hash cache legacy fallback triggered"
+            )
+        }
         if rawPath != path,
            let result = lookupByPath(
                rawPath, fileSize: fileSize, modifiedAt: modifiedAt,

@@ -143,6 +143,8 @@ public final class MergeViewModel {
     public private(set) var lastMergedSessionId: UUID?
     /// Container reference for undo decision transitions.
     private var lastContainer: ModelContainer?
+    private var loadTask: Task<Void, Never>?
+    private var loadEpoch: UInt64 = 0
 
     public init(
         logDirectory: URL? = nil,
@@ -261,42 +263,67 @@ public final class MergeViewModel {
 
     // MARK: - Undo
 
-    /// Undo the last completed transaction.
+    /// Undo the last completed transaction. Two-phase:
+    /// Phase A: filesystem restore + mark undone on disk.
+    /// Phase B: SwiftData .merged→.approved reconciliation.
+    /// If A succeeds but B fails, only B is retryable.
     public func undoLastTransaction() {
         guard let transaction = lastTransaction else { return }
 
         let logDir = self.logDirectory
         Task {
+            // Phase A: filesystem + persisted status
             let failures = await Task.detached {
                 MergeService().undo(transaction: transaction)
             }.value
 
-            if failures.isEmpty {
-                // Mark transaction as undone on disk — awaited so
-                // the persisted state transitions atomically with
-                // the in-memory and SwiftData transitions.
-                await Task.detached {
-                    try? MergeService().markUndone(
-                        transaction: transaction,
-                        logDirectory: logDir
-                    )
-                }.value
-                // Reverse .merged → .approved in SwiftData
-                if let container = lastContainer {
-                    transitionToApproved(
-                        container: container
-                    )
-                }
-                lastTransaction = nil
-                lastMergedGroupIds = nil
-                phase = .idle
-            } else {
+            guard failures.isEmpty else {
                 phase = .undoFailed(
                     failures: failures,
                     transaction: transaction
                 )
+                return
+            }
+
+            await Task.detached {
+                try? MergeService().markUndone(
+                    transaction: transaction,
+                    logDirectory: logDir
+                )
+            }.value
+
+            // Phase B: SwiftData reconciliation
+            let reconciled = reconcileDecisions()
+            if reconciled {
+                lastTransaction = nil
+                lastMergedGroupIds = nil
+                phase = .idle
+            } else {
+                // Files restored, log says .undone, but
+                // SwiftData still says .merged. Offer retry
+                // for reconciliation only.
+                phase = .undoFailed(
+                    failures: [
+                        "Files restored but decision state"
+                        + " could not be updated. Retry to"
+                        + " reconcile, or restart the app."
+                    ],
+                    transaction: transaction
+                )
             }
         }
+    }
+
+    /// Retry only the SwiftData reconciliation step after
+    /// undo already succeeded on the filesystem.
+    public func retryReconciliation() {
+        let reconciled = reconcileDecisions()
+        if reconciled {
+            lastTransaction = nil
+            lastMergedGroupIds = nil
+            phase = .idle
+        }
+        // If still fails, phase stays .undoFailed
     }
 
     // MARK: - Reset
@@ -304,6 +331,8 @@ public final class MergeViewModel {
     public func reset() {
         validateTask?.cancel()
         executeTask?.cancel()
+        loadTask?.cancel()
+        loadEpoch &+= 1
         phase = .idle
     }
 
@@ -311,8 +340,8 @@ public final class MergeViewModel {
 
     /// Load a persisted transaction from disk for the given session.
     /// Called on session selection to restore undo affordance across
-    /// app launches. Uses `transaction.groupIds` to scope undo to
-    /// exactly the groups merged in that operation.
+    /// app launches. Uses epoch guard to cancel stale loads on rapid
+    /// session switching.
     public func loadPersistedTransaction(
         for sessionId: UUID,
         container: ModelContainer
@@ -324,34 +353,49 @@ public final class MergeViewModel {
             return
         }
 
-        do {
-            let transactions = try MergeService()
-                .listTransactions(logDirectory: logDirectory)
+        loadTask?.cancel()
+        loadEpoch &+= 1
+        let expectedEpoch = loadEpoch
+        let logDir = self.logDirectory
 
-            // Find newest completed transaction for this session
-            guard let match = transactions.first(where: {
-                $0.sessionId == sessionId
-                    && $0.status == .completed
-            }) else { return }
+        loadTask = Task {
+            do {
+                let transactions = try await Task.detached {
+                    try MergeService()
+                        .listTransactions(logDirectory: logDir)
+                }.value
 
-            // Validate: at least one quarantine file still exists
-            let hasUndoableEntry = match.entries.contains {
-                guard let tp = $0.trashedPath else { return false }
-                return FileManager.default.fileExists(atPath: tp)
+                // Epoch guard: discard if a newer load started
+                guard expectedEpoch == loadEpoch else { return }
+                try Task.checkCancellation()
+
+                // Reconcile stranded decisions from CLI
+                // undo/purge (idempotent, runs on @MainActor)
+                reconcileStrandedDecisions(
+                    transactions: transactions,
+                    sessionId: sessionId,
+                    container: container
+                )
+
+                guard let match = transactions.first(where: {
+                    $0.sessionId == sessionId
+                        && isUndoEligible($0)
+                }) else { return }
+
+                // Second epoch guard after eligibility check
+                guard expectedEpoch == loadEpoch else { return }
+
+                lastTransaction = match
+                lastMergedSessionId = sessionId
+                lastContainer = container
+                lastMergedGroupIds = match.groupIds
+            } catch is CancellationError {
+                // Normal cancellation
+            } catch {
+                Self.logger.error(
+                    "Failed to load persisted tx: \(error)"
+                )
             }
-            guard hasUndoableEntry else { return }
-
-            lastTransaction = match
-            lastMergedSessionId = sessionId
-            lastContainer = container
-
-            // Use transaction-scoped group IDs (not "all merged
-            // in session") to prevent cross-transaction corruption.
-            lastMergedGroupIds = match.groupIds
-        } catch {
-            Self.logger.error(
-                "Failed to load persisted transaction: \(error)"
-            )
         }
     }
 
@@ -389,11 +433,11 @@ public final class MergeViewModel {
         onDecisionsTransitioned?(groupIds, .merged)
     }
 
-    /// Reverse merged groups back to .approved after undo.
-    private func transitionToApproved(
-        container: ModelContainer
-    ) {
-        guard let ids = lastMergedGroupIds else { return }
+    /// Phase B of undo: transition SwiftData .merged→.approved.
+    /// Returns true on success. Safe to retry — idempotent.
+    private func reconcileDecisions() -> Bool {
+        guard let container = lastContainer,
+              let ids = lastMergedGroupIds else { return true }
         let context = ModelContext(container)
         for gid in ids {
             let id = gid
@@ -414,11 +458,57 @@ public final class MergeViewModel {
             try context.save()
         } catch {
             Self.logger.error(
-                "Failed to persist .approved reversal: \(error)"
+                "Failed to reconcile decisions: \(error)"
             )
+            return false
         }
 
         onDecisionsTransitioned?(ids, .approved)
+        return true
+    }
+
+    // MARK: - Stranded Decision Reconciliation
+
+    /// Reconcile decisions stranded as `.merged` by CLI undo/purge.
+    /// Scans transactions for this session that are `.undone` or
+    /// `.purged` with known groupIds, and transitions matching
+    /// SwiftData decisions back to `.approved`. Idempotent.
+    private func reconcileStrandedDecisions(
+        transactions: [MergeTransaction],
+        sessionId: UUID,
+        container: ModelContainer
+    ) {
+        let stale = transactions.filter {
+            $0.sessionId == sessionId
+                && ($0.status == .undone || $0.status == .purged)
+                && $0.groupIds != nil
+        }
+        guard !stale.isEmpty else { return }
+
+        let context = ModelContext(container)
+        var reconciledIds: [UUID] = []
+        for tx in stale {
+            guard let ids = tx.groupIds else { continue }
+            for gid in ids {
+                let id = gid
+                let pred = #Predicate<ReviewDecision> {
+                    $0.groupId == id
+                }
+                var desc = FetchDescriptor<ReviewDecision>(
+                    predicate: pred
+                )
+                desc.fetchLimit = 1
+                if let decision = try? context.fetch(desc).first,
+                   decision.decisionState == .merged {
+                    decision.decisionState = .approved
+                    decision.decidedAt = Date()
+                    reconciledIds.append(gid)
+                }
+            }
+        }
+        guard !reconciledIds.isEmpty else { return }
+        try? context.save()
+        onDecisionsTransitioned?(reconciledIds, .approved)
     }
 
     // MARK: - Private: Fetch (main actor)
@@ -777,6 +867,33 @@ public final class MergeViewModel {
         let keeperPath: String
         let nonKeeperPaths: [String]
         let warnings: [MergeValidationWarning]
+    }
+
+    // MARK: - Undo Eligibility
+
+    /// Full eligibility check: status + scope + filesystem.
+    /// This is THE gate for undo affordances — used in
+    /// loadPersistedTransaction, AppRootView toolbar, etc.
+    private nonisolated func isUndoEligible(
+        _ transaction: MergeTransaction
+    ) -> Bool {
+        guard transaction.status.isStatusUndoEligible else {
+            return false
+        }
+        guard transaction.groupIds != nil else {
+            return false  // scope unknown, can't reconcile
+        }
+        return transaction.entries.contains {
+            guard let tp = $0.trashedPath else { return false }
+            return FileManager.default.fileExists(atPath: tp)
+        }
+    }
+
+    /// Whether the undo button should be shown. Checks full
+    /// eligibility: status, scope, and filesystem existence.
+    public var canUndo: Bool {
+        guard let tx = lastTransaction else { return false }
+        return isUndoEligible(tx)
     }
 
     // MARK: - Helpers
