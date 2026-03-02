@@ -819,6 +819,7 @@ public final class MergeViewModel {
             // Compute keeper rename if template is set
             let keeperRename = computeKeeperRename(
                 group: group,
+                movePaths: seenMovePaths,
                 warnings: &warnings,
                 skipped: &skipped
             )
@@ -1037,8 +1038,13 @@ public final class MergeViewModel {
     /// needed (keepOriginal, no-op, collision skipped/blocked).
     /// Mutates `warnings` for info-level collisions and `skipped`
     /// for block-level collisions.
+    ///
+    /// `movePaths`: canonical paths of all files scheduled for
+    /// quarantine. Companions in this set are excluded from rename
+    /// (they're about to be moved, not renamed).
     private nonisolated func computeKeeperRename(
         group: ResolvedGroup,
+        movePaths: Set<String>,
         warnings: inout [MergeValidationWarning],
         skipped: inout [MergeValidationWarning]
     ) -> KeeperRename? {
@@ -1057,10 +1063,29 @@ public final class MergeViewModel {
         // No-op: template produces same name
         guard newName != keeperFileName else { return nil }
 
+        // Protected path guard: refuse rename if source or
+        // target is in a protected location
+        if isProtectedPath(keeperURL) {
+            warnings.append(.protectedPath(
+                groupIndex: group.groupIndex,
+                path: group.keeperPath
+            ))
+            return nil
+        }
+        let targetURL = dir.appendingPathComponent(newName)
+        if isProtectedPath(targetURL) {
+            warnings.append(.protectedPath(
+                groupIndex: group.groupIndex,
+                path: targetURL.path
+            ))
+            return nil
+        }
+
         // Advisory collision check
         var resolvedName = newName
-        let newURL = dir.appendingPathComponent(newName)
-        if FileManager.default.fileExists(atPath: newURL.path) {
+        if FileManager.default.fileExists(
+            atPath: targetURL.path
+        ) {
             switch template.collisionPolicy {
             case .appendNumber:
                 resolvedName = resolveCollisionName(
@@ -1083,17 +1108,29 @@ public final class MergeViewModel {
             }
         }
 
+        // Use the resolved name (post-collision) for companion
+        // stem matching, so companions get the same suffix
+        let resolvedFileName = resolvedName
+
         // Resolve keeper's companions for atomic rename
         let keeperCompanions = CompanionResolver()
             .resolve(for: keeperURL)
         var companionRenames: [KeeperRename.CompanionRenameEntry]
             = []
         for comp in keeperCompanions.companions {
+            // Skip companions that are scheduled to be moved
+            let compCanonical = canonicalize(comp.url.path)
+            if movePaths.contains(compCanonical) {
+                continue
+            }
+
             let compNewName = template.previewCompanion(
-                keeperFileName: keeperFileName,
+                keeperFileName: resolvedFileName,
                 companionFileName: comp.url.lastPathComponent
             )
-            let compNewURL = dir.appendingPathComponent(compNewName)
+            let compNewURL = dir.appendingPathComponent(
+                compNewName
+            )
             companionRenames.append(.init(
                 originalPath: comp.url.path,
                 targetPath: compNewURL.path

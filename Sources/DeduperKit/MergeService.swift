@@ -320,10 +320,13 @@ public struct MergeService: Sendable {
     public func undo(transaction: MergeTransaction) -> [String] {
         var failures: [String] = []
 
-        // Phase 0: Reverse renames before restoring quarantined files
-        let renameEntries = transaction.entries.filter {
-            $0.operation == .rename
-        }
+        // Phase 0: Reverse renames before restoring quarantined files.
+        // Only reverse completed renames (planned-but-unexecuted are
+        // no-ops). Reverse in reverse order to reduce self-collision.
+        let renameEntries = transaction.entries
+            .filter { $0.operation == .rename
+                && $0.status == .completed }
+            .reversed()
         for entry in renameEntries {
             guard let oldPath = entry.renamedFrom else { continue }
             let currentURL = URL(
@@ -710,11 +713,38 @@ public enum MergeMode: String, Codable, Sendable {
 }
 
 /// Discriminates move-to-quarantine from in-place rename entries.
-public enum EntryOperation: String, Codable, Sendable {
+/// Has an `unknown` case for forward compatibility — entries with
+/// unknown operations are skipped by undo and purge.
+public enum EntryOperation: Sendable, Equatable {
     /// File moved to quarantine (or trash).
     case move
     /// File renamed in-place (keeper or companion).
     case rename
+    /// Unknown operation from a newer version. Preserves the raw
+    /// string for round-trip fidelity; skipped by undo/purge.
+    case unknown(String)
+}
+
+extension EntryOperation: Codable {
+    private static let knownValues: [String: EntryOperation] = [
+        "move": .move,
+        "rename": .rename,
+    ]
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer()
+            .decode(String.self)
+        self = Self.knownValues[raw] ?? .unknown(raw)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .move: try container.encode("move")
+        case .rename: try container.encode("rename")
+        case .unknown(let raw): try container.encode(raw)
+        }
+    }
 }
 
 /// Request to rename a keeper (or companion) in-place after

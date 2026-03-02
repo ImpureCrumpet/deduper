@@ -779,6 +779,42 @@ struct MergeServiceTests {
         #expect(entry.renamedFrom == nil)
     }
 
+    @Test("Forward compat: unknown operation decodes and round-trips")
+    func unknownOperationRoundTrips() throws {
+        let json = """
+        {
+            "originalPath": "/a/b.jpg",
+            "trashedPath": null,
+            "isCompanion": false,
+            "status": "completed",
+            "operation": "hardlink"
+        }
+        """.data(using: .utf8)!
+
+        let entry = try JSONDecoder().decode(
+            MergeTransaction.Entry.self, from: json
+        )
+
+        if case .unknown(let raw) = entry.operation {
+            #expect(raw == "hardlink")
+        } else {
+            Issue.record(
+                "Expected .unknown, got \(entry.operation)"
+            )
+        }
+
+        // Round-trip preserves the raw value
+        let reEncoded = try JSONEncoder().encode(entry)
+        let reDecoded = try JSONDecoder().decode(
+            MergeTransaction.Entry.self, from: reEncoded
+        )
+        if case .unknown(let raw) = reDecoded.operation {
+            #expect(raw == "hardlink")
+        } else {
+            Issue.record("Round-trip lost unknown operation")
+        }
+    }
+
     @Test("Companion rename entries are marked as companion")
     func companionRenameMarkedAsCompanion() throws {
         let dir = try makeTempDir()
