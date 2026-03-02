@@ -33,16 +33,6 @@ public struct SessionSidebarView: View {
                         )
                     }
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) {
-                        viewModel.deleteSession(
-                            session.sessionId,
-                            context: modelContext
-                        )
-                    } label: {
-                        Label("Remove", systemImage: "trash")
-                    }
-                }
         }
         .listStyle(.sidebar)
         .overlay {

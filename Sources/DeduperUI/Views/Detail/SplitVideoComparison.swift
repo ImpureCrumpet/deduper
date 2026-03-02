@@ -1,10 +1,11 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// Split-panel video comparison with synchronized playback.
 /// Keeper video on the left (masked), comparison video on the right.
-/// Audio crossfades as the divider moves: whichever side is dominant
-/// (>50%) plays at full volume; the other fades to silence.
+/// Audio switches as the divider moves: whichever side is dominant
+/// (>50%) plays at full volume; the other is silenced.
 public struct SplitVideoComparison: View {
     public let keeperPath: String
     public let comparisonPath: String
@@ -14,6 +15,13 @@ public struct SplitVideoComparison: View {
     @State private var dividerFraction: CGFloat = 0.5
     @State private var keeperPlayer: AVPlayer?
     @State private var comparisonPlayer: AVPlayer?
+    /// Reactive play/pause state driven by KVO on timeControlStatus.
+    @State private var isPlaying: Bool = false
+
+    /// Retained loop observers so we can remove them on teardown.
+    @State private var loopTokens: [Any] = []
+    /// Retained Combine sink for timeControlStatus KVO.
+    @State private var statusCancellable: AnyCancellable?
 
     public init(
         keeperPath: String,
@@ -75,14 +83,14 @@ public struct SplitVideoComparison: View {
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .task(id: keeperPath + comparisonPath) {
+            teardownPlayers()
             await setupPlayers()
         }
         .onChange(of: dividerFraction) {
             updateVolumes()
         }
         .onDisappear {
-            keeperPlayer?.pause()
-            comparisonPlayer?.pause()
+            teardownPlayers()
         }
     }
 
@@ -169,11 +177,6 @@ public struct SplitVideoComparison: View {
         }
     }
 
-    private var isPlaying: Bool {
-        (keeperPlayer?.timeControlStatus == .playing)
-            || (comparisonPlayer?.timeControlStatus == .playing)
-    }
-
     private func imageLabel(_ text: String) -> some View {
         Text(text)
             .font(.caption.bold())
@@ -185,9 +188,6 @@ public struct SplitVideoComparison: View {
     }
 
     private func setupPlayers() async {
-        keeperPlayer?.pause()
-        comparisonPlayer?.pause()
-
         let k = AVPlayer(
             url: URL(fileURLWithPath: keeperPath)
         )
@@ -195,17 +195,26 @@ public struct SplitVideoComparison: View {
             url: URL(fileURLWithPath: comparisonPath)
         )
 
-        // Loop both players
-        NotificationCenter.default.addObserver(
+        // Loop both players; store tokens for cleanup.
+        let tokenK = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: k.currentItem,
             queue: .main
         ) { _ in k.seek(to: .zero); k.play() }
-        NotificationCenter.default.addObserver(
+        let tokenC = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: c.currentItem,
             queue: .main
         ) { _ in c.seek(to: .zero); c.play() }
+        loopTokens = [tokenK, tokenC]
+
+        // Drive isPlaying reactively from keeper's timeControlStatus.
+        statusCancellable = k.publisher(for: \.timeControlStatus)
+            .receive(on: RunLoop.main)
+            .sink { [c] status in
+                isPlaying = (status == .playing)
+                    || (c.timeControlStatus == .playing)
+            }
 
         keeperPlayer = k
         comparisonPlayer = c
@@ -215,8 +224,19 @@ public struct SplitVideoComparison: View {
         c.play()
     }
 
+    /// Pause and clean up players and all observers.
+    private func teardownPlayers() {
+        keeperPlayer?.pause()
+        comparisonPlayer?.pause()
+        for token in loopTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        loopTokens = []
+        statusCancellable = nil
+        isPlaying = false
+    }
+
     private func updateVolumes() {
-        // Keeper is dominant when left side > 50%
         let keeperDominant = dividerFraction >= 0.5
         keeperPlayer?.volume = keeperDominant ? 1.0 : 0.0
         comparisonPlayer?.volume = keeperDominant ? 0.0 : 1.0
