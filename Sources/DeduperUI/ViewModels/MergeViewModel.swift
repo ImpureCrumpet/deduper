@@ -18,6 +18,9 @@ public enum MergeValidationWarning: Sendable, Identifiable {
     case samePhysicalFileAsKeeper(
         groupIndex: Int, keeperPath: String, path: String
     )
+    case renameCollision(
+        groupIndex: Int, path: String, targetName: String
+    )
 
     public var id: String {
         switch self {
@@ -31,6 +34,8 @@ public enum MergeValidationWarning: Sendable, Identifiable {
         case .companionIsKeeper(let i, _): "companionKeeper-\(i)"
         case .samePhysicalFileAsKeeper(let i, _, let p):
             "samePhysical-\(i)-\(p)"
+        case .renameCollision(let i, _, let t):
+            "renameCollision-\(i)-\(t)"
         }
     }
 
@@ -61,7 +66,22 @@ public enum MergeValidationWarning: Sendable, Identifiable {
             "Group \(i): companion is keeper elsewhere — \(URL(fileURLWithPath: p).lastPathComponent)"
         case .samePhysicalFileAsKeeper(let i, _, let p):
             "Group \(i): hard link / alias of keeper — move removes link, not storage — \(URL(fileURLWithPath: p).lastPathComponent)"
+        case .renameCollision(let i, _, let t):
+            "Group \(i): rename target '\(t)' already exists — rename skipped"
         }
+    }
+}
+
+/// Keeper rename target resolved during plan validation.
+public struct KeeperRename: Sendable {
+    public let originalPath: String
+    public let targetPath: String
+    /// Companion renames (keeper's sidecars/Live Photo pairs).
+    public let companionRenames: [CompanionRenameEntry]
+
+    public struct CompanionRenameEntry: Sendable {
+        public let originalPath: String
+        public let targetPath: String
     }
 }
 
@@ -72,6 +92,8 @@ public struct MergePlanItem: Identifiable, Sendable {
     public let keeperPath: String
     public let nonKeeperBundles: [AssetBundle]
     public let warnings: [MergeValidationWarning]
+    /// Non-nil when the keeper should be renamed in-place.
+    public let keeperRename: KeeperRename?
 
     public var totalFiles: Int {
         nonKeeperBundles.reduce(0) { $0 + $1.allFiles.count }
@@ -224,11 +246,46 @@ public final class MergeViewModel {
                     return
                 }
 
+                // Build rename requests from plan items
+                var renameRequests: [KeeperRenameRequest] = []
+                for item in plan.items {
+                    if let rename = item.keeperRename {
+                        renameRequests.append(
+                            KeeperRenameRequest(
+                                from: URL(
+                                    fileURLWithPath:
+                                        rename.originalPath
+                                ),
+                                to: URL(
+                                    fileURLWithPath:
+                                        rename.targetPath
+                                )
+                            )
+                        )
+                        for comp in rename.companionRenames {
+                            renameRequests.append(
+                                KeeperRenameRequest(
+                                    from: URL(
+                                        fileURLWithPath:
+                                            comp.originalPath
+                                    ),
+                                    to: URL(
+                                        fileURLWithPath:
+                                            comp.targetPath
+                                    ),
+                                    isCompanion: true
+                                )
+                            )
+                        }
+                    }
+                }
+
                 let sid = lastMergedSessionId
                 let mergedIds = plan.items.map(\.id)
                 let transaction = try await Task.detached {
                     try MergeService().moveToQuarantine(
                         assets: assets,
+                        renames: renameRequests,
                         sessionId: sid,
                         groupIds: mergedIds,
                         logDirectory: self.logDirectory,
@@ -534,6 +591,7 @@ public final class MergeViewModel {
         let selectedKeeperPath: String?
         let selectedKeeperFingerprint: String?
         let members: [MemberSnapshot]
+        let renameTemplateJSON: Data?
     }
 
     private struct MemberSnapshot: Sendable {
@@ -611,7 +669,8 @@ public final class MergeViewModel {
                         filePath: $0.filePath,
                         isKeeper: $0.isKeeper
                     )
-                }
+                },
+                renameTemplateJSON: decision.renameTemplateJSON
             ))
         }
 
@@ -757,6 +816,26 @@ public final class MergeViewModel {
                 missingNonKeeperTotal += missingCount
             }
 
+            // Compute keeper rename if template is set
+            let keeperRename = computeKeeperRename(
+                group: group,
+                warnings: &warnings,
+                skipped: &skipped
+            )
+            // If block policy triggered, skip entire group
+            if keeperRename == nil
+                && group.renameTemplateJSON != nil {
+                // Check if block collision caused this
+                let wasBlocked = skipped.contains { w in
+                    if case .renameCollision(let i, _, _) = w,
+                       i == group.groupIndex { return true }
+                    return false
+                }
+                if wasBlocked {
+                    continue
+                }
+            }
+
             // Only include if there are bundles to move
             if !bundles.isEmpty {
                 items.append(MergePlanItem(
@@ -764,7 +843,8 @@ public final class MergeViewModel {
                     groupIndex: group.groupIndex,
                     keeperPath: group.keeperPath,
                     nonKeeperBundles: bundles,
-                    warnings: warnings
+                    warnings: warnings,
+                    keeperRename: keeperRename
                 ))
             } else if !warnings.isEmpty {
                 // No bundles but had warnings (e.g. all missing)
@@ -875,7 +955,8 @@ public final class MergeViewModel {
             groupIndex: group.groupIndex,
             keeperPath: keeper,
             nonKeeperPaths: nonKeepers,
-            warnings: warnings
+            warnings: warnings,
+            renameTemplateJSON: group.renameTemplateJSON
         ))
     }
 
@@ -890,6 +971,7 @@ public final class MergeViewModel {
         let keeperPath: String
         let nonKeeperPaths: [String]
         let warnings: [MergeValidationWarning]
+        let renameTemplateJSON: Data?
     }
 
     // MARK: - Undo Eligibility
@@ -906,10 +988,22 @@ public final class MergeViewModel {
         guard transaction.groupIds != nil else {
             return false  // scope unknown, can't reconcile
         }
-        return transaction.entries.contains {
-            guard let tp = $0.trashedPath else { return false }
-            return FileManager.default.fileExists(atPath: tp)
+        // Move entries: at least one quarantined file must exist
+        let hasMoveToRestore = transaction.entries.contains {
+            $0.operation == .move
+                && $0.trashedPath != nil
+                && FileManager.default.fileExists(
+                    atPath: $0.trashedPath!
+                )
         }
+        // Rename entries: reversible if the renamed file exists
+        let hasRenameToReverse = transaction.entries.contains {
+            $0.operation == .rename
+                && FileManager.default.fileExists(
+                    atPath: $0.originalPath
+                )
+        }
+        return hasMoveToRestore || hasRenameToReverse
     }
 
     /// Whether the undo button should be shown. Checks full
@@ -935,6 +1029,104 @@ public final class MergeViewModel {
             "/private/var",
         ]
         return prefixes.contains { path.hasPrefix($0) }
+    }
+
+    // MARK: - Rename Helpers
+
+    /// Compute keeper rename from template. Returns nil if no rename
+    /// needed (keepOriginal, no-op, collision skipped/blocked).
+    /// Mutates `warnings` for info-level collisions and `skipped`
+    /// for block-level collisions.
+    private nonisolated func computeKeeperRename(
+        group: ResolvedGroup,
+        warnings: inout [MergeValidationWarning],
+        skipped: inout [MergeValidationWarning]
+    ) -> KeeperRename? {
+        guard let data = group.renameTemplateJSON,
+              let template = try? JSONDecoder().decode(
+                  RenameTemplate.self, from: data
+              ),
+              template.mode != .keepOriginal
+        else { return nil }
+
+        let keeperURL = URL(fileURLWithPath: group.keeperPath)
+        let keeperFileName = keeperURL.lastPathComponent
+        let newName = template.preview(for: keeperFileName)
+        let dir = keeperURL.deletingLastPathComponent()
+
+        // No-op: template produces same name
+        guard newName != keeperFileName else { return nil }
+
+        // Advisory collision check
+        var resolvedName = newName
+        let newURL = dir.appendingPathComponent(newName)
+        if FileManager.default.fileExists(atPath: newURL.path) {
+            switch template.collisionPolicy {
+            case .appendNumber:
+                resolvedName = resolveCollisionName(
+                    dir: dir, newName: newName
+                )
+            case .skip:
+                warnings.append(.renameCollision(
+                    groupIndex: group.groupIndex,
+                    path: group.keeperPath,
+                    targetName: newName
+                ))
+                return nil
+            case .block:
+                skipped.append(.renameCollision(
+                    groupIndex: group.groupIndex,
+                    path: group.keeperPath,
+                    targetName: newName
+                ))
+                return nil
+            }
+        }
+
+        // Resolve keeper's companions for atomic rename
+        let keeperCompanions = CompanionResolver()
+            .resolve(for: keeperURL)
+        var companionRenames: [KeeperRename.CompanionRenameEntry]
+            = []
+        for comp in keeperCompanions.companions {
+            let compNewName = template.previewCompanion(
+                keeperFileName: keeperFileName,
+                companionFileName: comp.url.lastPathComponent
+            )
+            let compNewURL = dir.appendingPathComponent(compNewName)
+            companionRenames.append(.init(
+                originalPath: comp.url.path,
+                targetPath: compNewURL.path
+            ))
+        }
+
+        return KeeperRename(
+            originalPath: group.keeperPath,
+            targetPath: dir.appendingPathComponent(resolvedName)
+                .path,
+            companionRenames: companionRenames
+        )
+    }
+
+    /// Find a non-colliding name by appending "-1", "-2", etc.
+    private nonisolated func resolveCollisionName(
+        dir: URL, newName: String
+    ) -> String {
+        let ext = (newName as NSString).pathExtension
+        let stem = (newName as NSString).deletingPathExtension
+        for i in 1...999 {
+            let candidate: String
+            if ext.isEmpty {
+                candidate = "\(stem)-\(i)"
+            } else {
+                candidate = "\(stem)-\(i).\(ext)"
+            }
+            let url = dir.appendingPathComponent(candidate)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                return candidate
+            }
+        }
+        return newName // fallback — execution handles failure
     }
 }
 
