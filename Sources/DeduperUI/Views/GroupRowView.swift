@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Group row in the group list with confidence badge and risk flags.
 public struct GroupRowView: View {
@@ -83,6 +84,32 @@ public struct GroupRowView: View {
             }
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            if let keeper = group.suggestedKeeperPath {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: keeper)]
+                    )
+                } label: {
+                    Label(
+                        "Reveal in Finder",
+                        systemImage: "folder"
+                    )
+                }
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        keeper, forType: .string
+                    )
+                } label: {
+                    Label(
+                        "Copy Keeper Path",
+                        systemImage: "doc.on.doc"
+                    )
+                }
+            }
+        }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {

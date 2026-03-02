@@ -86,6 +86,52 @@ public struct MemberCard: View {
                     lineWidth: 1
                 )
         )
+        .contextMenu {
+            if member.fileExists {
+                Button {
+                    showPreview = true
+                } label: {
+                    Label("Quick Look", systemImage: "eye")
+                }
+
+                Button {
+                    let url = URL(
+                        fileURLWithPath: member.path
+                    )
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [url]
+                    )
+                } label: {
+                    Label(
+                        "Reveal in Finder",
+                        systemImage: "folder"
+                    )
+                }
+
+                Divider()
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    member.path, forType: .string
+                )
+            } label: {
+                Label("Copy Path", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    member.fileName, forType: .string
+                )
+            } label: {
+                Label(
+                    "Copy Filename",
+                    systemImage: "doc.on.clipboard"
+                )
+            }
+        }
     }
 
     @ViewBuilder
@@ -94,7 +140,7 @@ public struct MemberCard: View {
            let nsImage = NSImage(data: data) {
             Image(nsImage: nsImage)
                 .resizable()
-                .aspectRatio(contentMode: .fit)
+                .aspectRatio(contentMode: .fill)
         } else if !member.fileExists {
             ZStack {
                 Color(.windowBackgroundColor)
