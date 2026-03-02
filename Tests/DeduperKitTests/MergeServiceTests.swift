@@ -911,6 +911,75 @@ struct MergeServiceTests {
         #expect(transaction.errors[0].operation == .rename)
     }
 
+    @Test("Companion rename failure rolls back keeper rename")
+    func companionFailureRollsBackKeeper() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+
+        // Create keeper file
+        let keeper = dir.appendingPathComponent("keeper.heic")
+        try Data("keeper".utf8).write(to: keeper)
+
+        // Create a blocker at the companion's target path
+        let compTarget = dir.appendingPathComponent(
+            "Renamed.aae"
+        )
+        try Data("blocker".utf8).write(to: compTarget)
+
+        // Keeper rename + companion rename (companion will fail
+        // because target already exists)
+        let keeperTarget = dir.appendingPathComponent(
+            "Renamed.heic"
+        )
+        let companion = dir.appendingPathComponent("keeper.aae")
+        try Data("sidecar".utf8).write(to: companion)
+
+        let renames = [
+            KeeperRenameRequest(
+                from: keeper, to: keeperTarget
+            ),
+            KeeperRenameRequest(
+                from: companion, to: compTarget,
+                isCompanion: true
+            ),
+        ]
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: renames,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Keeper rename should have been rolled back
+        #expect(
+            FileManager.default.fileExists(atPath: keeper.path),
+            "Keeper should be restored to original name"
+        )
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: keeperTarget.path
+            ),
+            "Keeper target should not exist after rollback"
+        )
+        // Companion original should still exist (rename failed)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: companion.path
+            )
+        )
+        // No rename entries should be in the transaction
+        // (rollback succeeded, so they aren't recorded)
+        let renameEntries = transaction.entries.filter {
+            $0.operation == .rename
+        }
+        #expect(renameEntries.isEmpty)
+        // Should have one rename error for the companion
+        #expect(transaction.renameErrorCount == 1)
+    }
+
     @Test("Move error defaults to .move operation")
     func moveErrorDefaultsToMove() throws {
         // Backward compat: error without operation decodes as .move

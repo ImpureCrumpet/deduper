@@ -1105,11 +1105,16 @@ public final class MergeViewModel {
             return nil
         }
 
-        // Advisory collision check: filesystem + cross-group
+        // Advisory collision check: filesystem + cross-group.
+        // A file that currently exists but is scheduled for
+        // quarantine (in movePaths) will be vacated before
+        // renames execute, so treat it as available.
         let canonicalTarget = canonicalize(targetURL.path)
-        let hasCollision = FileManager.default.fileExists(
+        let existsOnDisk = FileManager.default.fileExists(
             atPath: targetURL.path
-        ) || reservedTargets.contains(canonicalTarget)
+        ) && !movePaths.contains(canonicalTarget)
+        let hasCollision = existsOnDisk
+            || reservedTargets.contains(canonicalTarget)
 
         var resolvedName = newName
         if hasCollision {
@@ -1118,7 +1123,8 @@ public final class MergeViewModel {
                 resolvedName = resolveCollisionName(
                     dir: dir,
                     newName: newName,
-                    reserved: reservedTargets
+                    reserved: reservedTargets,
+                    vacated: movePaths
                 )
             case .skip:
                 warnings.append(.renameCollision(
@@ -1184,10 +1190,13 @@ public final class MergeViewModel {
 
     /// Find a non-colliding name by appending "-1", "-2", etc.
     /// Checks both the filesystem and the cross-group reserved set.
+    /// Files in `vacated` are being quarantined and will be gone
+    /// before renames execute, so they don't count as collisions.
     private nonisolated func resolveCollisionName(
         dir: URL,
         newName: String,
-        reserved: Set<String>
+        reserved: Set<String>,
+        vacated: Set<String>
     ) -> String {
         let ext = (newName as NSString).pathExtension
         let stem = (newName as NSString).deletingPathExtension
@@ -1200,8 +1209,10 @@ public final class MergeViewModel {
             }
             let url = dir.appendingPathComponent(candidate)
             let canonical = canonicalize(url.path)
-            if !FileManager.default.fileExists(atPath: url.path)
-                && !reserved.contains(canonical) {
+            let onDisk = FileManager.default.fileExists(
+                atPath: url.path
+            ) && !vacated.contains(canonical)
+            if !onDisk && !reserved.contains(canonical) {
                 return candidate
             }
         }

@@ -139,37 +139,100 @@ public struct MergeService: Sendable {
             }
         }
 
-        // Execute keeper renames (after quarantine moves)
-        for rename in renames {
-            do {
-                try FileManager.default.moveItem(
-                    at: rename.from, to: rename.to
-                )
-                completedEntries.append(.init(
-                    originalPath: rename.to.path,
-                    trashedPath: nil,
-                    isCompanion: rename.isCompanion,
-                    status: .completed,
-                    operation: .rename,
-                    renamedFrom: rename.from.path
-                ))
-                try writeJournalEntry(
-                    "renamed:\(rename.from.path)"
-                        + "->\(rename.to.path)",
-                    txId: txId, to: journalPath
-                )
-                logger.info(
-                    "Renamed: \(rename.from.lastPathComponent) -> \(rename.to.lastPathComponent)"
-                )
-            } catch {
-                errors.append(.init(
-                    originalPath: rename.from.path,
-                    reason: "Rename failed: \(error.localizedDescription)",
-                    operation: .rename
-                ))
-                logger.error(
-                    "Failed to rename \(rename.from.lastPathComponent): \(error.localizedDescription)"
-                )
+        // Execute keeper renames (after quarantine moves).
+        // Renames are ordered: keeper (isCompanion=false) then
+        // its companions (isCompanion=true). Each keeper starts
+        // a new group. On failure within a group, roll back any
+        // already-renamed files to maintain per-group consistency.
+        var renameGroups: [[(request: KeeperRenameRequest,
+                             index: Int)]] = []
+        for (i, rename) in renames.enumerated() {
+            if !rename.isCompanion {
+                renameGroups.append([(rename, i)])
+            } else if !renameGroups.isEmpty {
+                renameGroups[renameGroups.count - 1]
+                    .append((rename, i))
+            }
+        }
+
+        for group in renameGroups {
+            var groupSucceeded: [(from: URL, to: URL)] = []
+            var groupFailed = false
+
+            for (rename, _) in group {
+                do {
+                    try FileManager.default.moveItem(
+                        at: rename.from, to: rename.to
+                    )
+                    groupSucceeded.append(
+                        (from: rename.from, to: rename.to)
+                    )
+                } catch {
+                    groupFailed = true
+                    errors.append(.init(
+                        originalPath: rename.from.path,
+                        reason: "Rename failed: \(error.localizedDescription)",
+                        operation: .rename
+                    ))
+                    logger.error(
+                        "Failed to rename \(rename.from.lastPathComponent): \(error.localizedDescription)"
+                    )
+                    break
+                }
+            }
+
+            if groupFailed {
+                // Roll back already-renamed files in this group
+                for pair in groupSucceeded.reversed() {
+                    do {
+                        try FileManager.default.moveItem(
+                            at: pair.to, to: pair.from
+                        )
+                        logger.info(
+                            "Rolled back rename: \(pair.to.lastPathComponent) -> \(pair.from.lastPathComponent)"
+                        )
+                    } catch {
+                        // Rollback failure: log but still record
+                        // the completed rename so undo can handle it
+                        logger.error(
+                            "Rollback failed for \(pair.to.lastPathComponent): \(error.localizedDescription)"
+                        )
+                        completedEntries.append(.init(
+                            originalPath: pair.to.path,
+                            trashedPath: nil,
+                            isCompanion: pair.from != pair.to,
+                            status: .completed,
+                            operation: .rename,
+                            renamedFrom: pair.from.path
+                        ))
+                    }
+                }
+            } else {
+                // All renames in this group succeeded
+                for (rename, _) in group {
+                    completedEntries.append(.init(
+                        originalPath: rename.to.path,
+                        trashedPath: nil,
+                        isCompanion: rename.isCompanion,
+                        status: .completed,
+                        operation: .rename,
+                        renamedFrom: rename.from.path
+                    ))
+                    do {
+                        try writeJournalEntry(
+                            "renamed:\(rename.from.path)"
+                                + "->\(rename.to.path)",
+                            txId: txId, to: journalPath
+                        )
+                    } catch {
+                        logger.error(
+                            "Journal write failed for rename: \(error.localizedDescription)"
+                        )
+                    }
+                    logger.info(
+                        "Renamed: \(rename.from.lastPathComponent) -> \(rename.to.lastPathComponent)"
+                    )
+                }
             }
         }
 
