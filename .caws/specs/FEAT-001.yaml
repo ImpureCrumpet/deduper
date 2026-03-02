@@ -1,0 +1,111 @@
+id: FEAT-001
+type: feature
+title: Deduper media deduplication workflow
+status: active
+risk_tier: 2
+mode: feature
+created_at: '2026-03-02T00:09:10.931Z'
+updated_at: '2026-03-02T00:10:42.000Z'
+description: |
+  CLI-first + GUI tool for finding and removing duplicate media files
+  (photos, videos, audio). Uses perceptual hashing, BK-tree indexing,
+  and video frame fingerprinting for detection. Move-to-trash only,
+  never permanent deletion.
+change_budget:
+  max_files: 25
+  max_loc: 1000
+blast_radius:
+  modules:
+    - Sources/DeduperKit
+    - Sources/DeduperCLI
+    - Sources/DeduperUI
+    - Sources/DeduperApp
+    - Tests
+  data_migration: false
+operational_rollback_slo: 5m
+scope:
+  in:
+    - Sources/
+    - Tests/
+    - Scripts/
+    - .claude/
+    - .caws/
+    - Package.swift
+  out:
+    - .build/
+    - .git/
+    - tmp/
+    - node_modules/
+    - build/
+    - dist/
+invariants:
+  - Move-to-trash by default, never permanent deletion
+  - Transaction logging for all file operations with rollback
+  - Protected path detection prevents system folder modification
+acceptance:
+  - id: A1
+    given: A valid project checkout on macOS with Swift 6 toolchain
+    when: The repository is built and tested
+    then: swift build and swift test succeed with no new warnings
+    status: pending
+  - id: A2
+    given: A directory containing duplicate and unique media files
+    when: The CLI scan command runs end-to-end
+    then: Duplicates are detected and only move-to-trash operations are proposed
+    status: pending
+  - id: A3
+    given: A merge or cleanup transaction has been executed
+    when: Undo is requested
+    then: Transaction logging supports rollback without touching protected paths
+    status: pending
+acceptance_criteria:
+  - id: A1
+    description: Build and tests pass for current Swift packages and test suites
+    completed: false
+  - id: A2
+    description: CLI scan works end-to-end and never performs permanent deletion
+    completed: false
+  - id: A3
+    description: Transaction log enables undo and rollback for file operations
+    completed: false
+non_functional:
+  a11y:
+    - CLI output remains readable in standard terminal widths
+    - Output does not rely on color alone for critical warnings
+  perf:
+    scan_p95_seconds_per_10k_files: 120
+    hash_index_memory_mb_max: 512
+  security:
+    - Protected system paths are never mutated
+    - File operations are move-to-trash only
+contracts:
+  - type: project_setup
+    path: .caws/specs/FEAT-001.yaml
+    description: Baseline project contract for current deduper workflow
+observability:
+  logs:
+    - Record scan execution start and completion with target path and duration
+    - Record each transaction id and rollback status
+  metrics:
+    - duplicate_candidates_detected_total
+    - file_operations_move_to_trash_total
+rollback:
+  - Re-run undo for the most recent transaction id from the transaction log
+  - Restore previous CLI behavior using the last known-good commit
+architecture:
+  targets:
+    - name: DeduperKit
+      type: library
+      description: Core business logic, algorithms, services
+    - name: DeduperCLI
+      type: executable
+      description: Command-line interface using ArgumentParser
+    - name: DeduperUI
+      type: library
+      description: SwiftUI components (deferred)
+    - name: DeduperApp
+      type: executable
+      description: macOS SwiftUI application (deferred)
+  persistence: SwiftData
+  concurrency: Swift 6 strict concurrency
+  platform: macOS 14+
