@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Comparison display mode.
 public enum ComparisonMode: String, CaseIterable {
@@ -71,16 +72,35 @@ public struct ComparisonView: View {
     @ViewBuilder
     private var splitView: some View {
         if let keeper, let selected = selectedMember {
-            SplitImageComparison(
-                keeperPath: keeper.path,
-                comparisonPath: selected.path,
-                keeperLabel: "Keeper: \(keeper.fileName)",
-                comparisonLabel: selected.fileName
-            )
-            .frame(minHeight: 400)
+            if isVideo(keeper.path) || isVideo(selected.path) {
+                SplitVideoComparison(
+                    keeperPath: keeper.path,
+                    comparisonPath: selected.path,
+                    keeperLabel: "Keeper: \(keeper.fileName)",
+                    comparisonLabel: selected.fileName
+                )
+                .frame(minHeight: 400)
+            } else {
+                SplitImageComparison(
+                    keeperPath: keeper.path,
+                    comparisonPath: selected.path,
+                    keeperLabel: "Keeper: \(keeper.fileName)",
+                    comparisonLabel: selected.fileName
+                )
+                .frame(minHeight: 400)
+            }
         } else {
             placeholderView
         }
+    }
+
+    /// Returns true when the path is a video file.
+    private func isVideo(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        guard let uti = UTType(
+            filenameExtension: url.pathExtension
+        ) else { return false }
+        return uti.conforms(to: .audiovisualContent)
     }
 
     @ViewBuilder
