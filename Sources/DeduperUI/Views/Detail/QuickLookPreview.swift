@@ -2,7 +2,9 @@ import SwiftUI
 import Quartz
 
 /// Embedded Quick Look preview via NSViewRepresentable.
-/// Safer than QLPreviewPanel (no responder chain issues in SwiftUI).
+/// Uses a plain NSView wrapper so the Swift runtime can resolve the
+/// NSViewType associated type without triggering the QLPreviewView
+/// metadata crash on macOS 26 (rdar://Swift runtime getSuperclassMetadata).
 public struct QuickLookPreview: NSViewRepresentable {
     public let url: URL
 
@@ -10,20 +12,24 @@ public struct QuickLookPreview: NSViewRepresentable {
         self.url = url
     }
 
-    public func makeNSView(
-        context: Context
-    ) -> QLPreviewView {
-        let view = QLPreviewView(
+    public func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        if let preview = QLPreviewView(
             frame: .zero, style: .normal
-        )!
-        view.previewItem = url as QLPreviewItem
-        return view
+        ) {
+            preview.previewItem = url as QLPreviewItem
+            preview.autoresizingMask = [.width, .height]
+            preview.frame = container.bounds
+            container.addSubview(preview)
+        }
+        return container
     }
 
-    public func updateNSView(
-        _ view: QLPreviewView,
-        context: Context
-    ) {
-        view.previewItem = url as QLPreviewItem
+    public func updateNSView(_ nsView: NSView, context: Context) {
+        guard let preview = nsView.subviews.first
+                as? QLPreviewView else { return }
+        if (preview.previewItem as? URL) != url {
+            preview.previewItem = url as QLPreviewItem
+        }
     }
 }
