@@ -533,7 +533,6 @@ public final class MergeViewModel {
         if !pathMap.isEmpty {
             rewriteMemberPaths(
                 pathMap: pathMap,
-                container: container,
                 context: context
             )
         }
@@ -551,25 +550,24 @@ public final class MergeViewModel {
 
     /// Rewrite GroupMember.filePath and .fileName for paths in the map.
     /// Scoped to the current session to avoid cross-session rewrites.
+    /// Rewrite keeper GroupMember rows for renamed paths.
+    /// Scoped to sessionId + isKeeper==true so non-keeper rows
+    /// (quarantined, correctly showing "missing") are untouched.
     private func rewriteMemberPaths(
         pathMap: [String: String],
-        container: ModelContainer,
         context: ModelContext
     ) {
         let sid = lastMergedSessionId ?? UUID()
-        for (oldPath, newPath) in pathMap {
-            let old = oldPath
-            let sessionId = sid
-            let pred = #Predicate<GroupMember> {
-                $0.sessionId == sessionId && $0.filePath == old
-            }
-            let desc = FetchDescriptor<GroupMember>(
-                predicate: pred
-            )
-            guard let members = try? context.fetch(desc) else {
-                continue
-            }
-            for member in members {
+        let sessionId = sid
+        let pred = #Predicate<GroupMember> {
+            $0.sessionId == sessionId && $0.isKeeper == true
+        }
+        guard let keepers = try? context.fetch(
+            FetchDescriptor<GroupMember>(predicate: pred)
+        ) else { return }
+
+        for member in keepers {
+            if let newPath = pathMap[member.filePath] {
                 member.filePath = newPath
                 member.fileName = URL(
                     fileURLWithPath: newPath
@@ -605,8 +603,6 @@ public final class MergeViewModel {
         }
 
         let context = ModelContext(container)
-        let sid = lastMergedSessionId ?? transaction.sessionId
-            ?? UUID()
         var changed = false
 
         // Reconcile ReviewDecision.selectedKeeperPath
@@ -630,27 +626,11 @@ public final class MergeViewModel {
             }
         }
 
-        // Reconcile GroupMember.filePath
-        for (source, target) in pathMap {
-            let src = source
-            let sessionId = sid
-            let pred = #Predicate<GroupMember> {
-                $0.sessionId == sessionId && $0.filePath == src
-            }
-            let desc = FetchDescriptor<GroupMember>(
-                predicate: pred
-            )
-            guard let members = try? context.fetch(desc) else {
-                continue
-            }
-            for member in members {
-                member.filePath = target
-                member.fileName = URL(
-                    fileURLWithPath: target
-                ).lastPathComponent
-                changed = true
-            }
-        }
+        // Reconcile GroupMember.filePath (keeper rows only)
+        rewriteMemberPaths(pathMap: pathMap, context: context)
+        // Always attempt save if any decisions were updated,
+        // or if there are member rows that may have changed.
+        changed = changed || !pathMap.isEmpty
 
         if changed {
             do {
@@ -709,7 +689,6 @@ public final class MergeViewModel {
         if !reverseMap.isEmpty {
             rewriteMemberPaths(
                 pathMap: reverseMap,
-                container: container,
                 context: context
             )
         }
