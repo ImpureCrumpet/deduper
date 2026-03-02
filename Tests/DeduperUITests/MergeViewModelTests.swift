@@ -881,6 +881,131 @@ struct MergeViewModelTests {
         }
     }
 
+    @Test("Execute with rename updates SwiftData paths")
+    @MainActor
+    func executeWithRenameUpdatesSwiftDataPaths() async throws {
+        let s = try makeScenario(
+            groupCount: 1, membersPerGroup: 2
+        )
+        defer { cleanup(s.tempDir) }
+
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let quarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { cleanup(logDir); cleanup(quarDir) }
+
+        // Add a rename template (suffix mode) to the decision
+        let template = RenameTemplate(
+            mode: .suffix, value: "_best"
+        )
+        let templateJSON = try JSONEncoder().encode(template)
+
+        let context = ModelContext(s.container)
+        let sid = s.sessionId
+        let pred = #Predicate<ReviewDecision> {
+            $0.sessionId == sid
+        }
+        let decisions = try context.fetch(
+            FetchDescriptor<ReviewDecision>(predicate: pred)
+        )
+        let decision = try #require(decisions.first)
+        decision.renameTemplateJSON = templateJSON
+        // Set selectedKeeperPath so we can verify rewrite
+        decision.selectedKeeperPath = s.tempFiles[0].path
+        try context.save()
+
+        let keeperOriginalPath = s.tempFiles[0].path
+        let keeperDir = s.tempFiles[0].deletingLastPathComponent()
+        let keeperStem = (
+            s.tempFiles[0].lastPathComponent as NSString
+        ).deletingPathExtension
+        let keeperExt = s.tempFiles[0].pathExtension
+        let expectedNewName = "\(keeperStem)_best.\(keeperExt)"
+        let expectedNewPath = keeperDir
+            .appendingPathComponent(expectedNewName).path
+
+        let vm = MergeViewModel(
+            logDirectory: logDir, quarantineRoot: quarDir
+        )
+        vm.validate(
+            sessionId: s.sessionId, container: s.container
+        )
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected preview phase")
+            return
+        }
+
+        // Verify plan includes rename
+        #expect(plan.items.first?.keeperRename != nil)
+
+        vm.execute(plan: plan, container: s.container)
+        await waitForExecution(vm)
+
+        guard case .completed(let tx) = vm.phase else {
+            Issue.record(
+                "Expected completed phase, got \(vm.phase)"
+            )
+            return
+        }
+
+        // Verify filesystem: keeper renamed
+        #expect(FileManager.default.fileExists(
+            atPath: expectedNewPath
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: keeperOriginalPath
+        ))
+
+        // Verify SwiftData: decision keeper path updated
+        let ctx2 = ModelContext(s.container)
+        let decisions2 = try ctx2.fetch(
+            FetchDescriptor<ReviewDecision>(predicate: pred)
+        )
+        let updatedDecision = try #require(decisions2.first)
+        #expect(updatedDecision.selectedKeeperPath
+            == expectedNewPath)
+
+        // Verify SwiftData: member path updated
+        let gid = s.groupIds[0]
+        let memberPred = #Predicate<GroupMember> {
+            $0.sessionId == sid && $0.groupId == gid
+                && $0.isKeeper == true
+        }
+        let members = try ctx2.fetch(
+            FetchDescriptor<GroupMember>(predicate: memberPred)
+        )
+        let keeperMember = try #require(members.first)
+        #expect(keeperMember.filePath == expectedNewPath)
+        #expect(keeperMember.fileName == expectedNewName)
+
+        // Undo and verify paths revert
+        vm.undoLastTransaction()
+        await waitForUndo(vm)
+
+        let ctx3 = ModelContext(s.container)
+        let decisions3 = try ctx3.fetch(
+            FetchDescriptor<ReviewDecision>(predicate: pred)
+        )
+        let revertedDecision = try #require(decisions3.first)
+        #expect(revertedDecision.selectedKeeperPath
+            == keeperOriginalPath)
+        #expect(revertedDecision.decisionState == .approved)
+
+        let members3 = try ctx3.fetch(
+            FetchDescriptor<GroupMember>(predicate: memberPred)
+        )
+        let revertedMember = try #require(members3.first)
+        #expect(revertedMember.filePath == keeperOriginalPath)
+
+        // Verify filesystem: keeper back to original name
+        #expect(FileManager.default.fileExists(
+            atPath: keeperOriginalPath
+        ))
+    }
+
     @Test("Double-run after merge produces empty plan")
     @MainActor
     func doubleRunProducesEmptyPlan() async throws {

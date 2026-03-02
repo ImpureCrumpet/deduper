@@ -304,7 +304,8 @@ public final class MergeViewModel {
                     lastContainer = container
                     transitionToMerged(
                         groupIds: mergedIds,
-                        container: container
+                        container: container,
+                        transaction: transaction
                     )
                 } else if let container {
                     lastContainer = container
@@ -466,12 +467,34 @@ public final class MergeViewModel {
 
     // MARK: - Decision Transitions
 
+    /// Build old→new path mapping from completed rename entries.
+    /// Only includes non-companion renames (keeper paths).
+    private nonisolated func renameMap(
+        from transaction: MergeTransaction
+    ) -> [String: String] {
+        var map: [String: String] = [:]
+        for entry in transaction.entries
+        where entry.operation == .rename
+            && entry.status == .completed {
+            guard let oldPath = entry.renamedFrom else {
+                continue
+            }
+            map[oldPath] = entry.originalPath
+        }
+        return map
+    }
+
     /// Transition merged groups from .approved to .merged in SwiftData.
+    /// Also rewrites keeper paths to post-rename values using the
+    /// transaction's completed rename entries.
     private func transitionToMerged(
         groupIds: [UUID],
-        container: ModelContainer
+        container: ModelContainer,
+        transaction: MergeTransaction
     ) {
+        let pathMap = renameMap(from: transaction)
         let context = ModelContext(container)
+
         for gid in groupIds {
             let id = gid
             let pred = #Predicate<ReviewDecision> {
@@ -485,8 +508,24 @@ public final class MergeViewModel {
                decision.decisionState == .approved {
                 decision.decisionState = .merged
                 decision.decidedAt = Date()
+
+                // Rewrite selectedKeeperPath if it was renamed
+                if let old = decision.selectedKeeperPath,
+                   let newPath = pathMap[old] {
+                    decision.selectedKeeperPath = newPath
+                }
             }
         }
+
+        // Rewrite GroupMember paths for renamed files
+        if !pathMap.isEmpty {
+            rewriteMemberPaths(
+                pathMap: pathMap,
+                container: container,
+                context: context
+            )
+        }
+
         do {
             try context.save()
         } catch {
@@ -498,11 +537,51 @@ public final class MergeViewModel {
         onDecisionsTransitioned?(groupIds, .merged)
     }
 
-    /// Phase B of undo: transition SwiftData .merged→.approved.
-    /// Returns true on success. Safe to retry — idempotent.
+    /// Rewrite GroupMember.filePath and .fileName for paths in the map.
+    /// Scoped to the current session to avoid cross-session rewrites.
+    private func rewriteMemberPaths(
+        pathMap: [String: String],
+        container: ModelContainer,
+        context: ModelContext
+    ) {
+        let sid = lastMergedSessionId ?? UUID()
+        for (oldPath, newPath) in pathMap {
+            let old = oldPath
+            let sessionId = sid
+            let pred = #Predicate<GroupMember> {
+                $0.sessionId == sessionId && $0.filePath == old
+            }
+            let desc = FetchDescriptor<GroupMember>(
+                predicate: pred
+            )
+            guard let members = try? context.fetch(desc) else {
+                continue
+            }
+            for member in members {
+                member.filePath = newPath
+                member.fileName = URL(
+                    fileURLWithPath: newPath
+                ).lastPathComponent
+            }
+        }
+    }
+
+    /// Phase B of undo: transition SwiftData .merged→.approved
+    /// and reverse any rename path rewrites. Returns true on
+    /// success. Safe to retry — idempotent.
     private func reconcileDecisions() -> Bool {
         guard let container = lastContainer,
               let ids = lastMergedGroupIds else { return true }
+
+        // Build reverse map (new→old) from the transaction
+        var reverseMap: [String: String] = [:]
+        if let tx = lastTransaction {
+            let fwd = renameMap(from: tx)
+            for (old, new) in fwd {
+                reverseMap[new] = old
+            }
+        }
+
         let context = ModelContext(container)
         for gid in ids {
             let id = gid
@@ -517,8 +596,24 @@ public final class MergeViewModel {
                decision.decisionState == .merged {
                 decision.decisionState = .approved
                 decision.decidedAt = Date()
+
+                // Reverse keeper path rewrite
+                if let current = decision.selectedKeeperPath,
+                   let oldPath = reverseMap[current] {
+                    decision.selectedKeeperPath = oldPath
+                }
             }
         }
+
+        // Reverse GroupMember path rewrites
+        if !reverseMap.isEmpty {
+            rewriteMemberPaths(
+                pathMap: reverseMap,
+                container: container,
+                context: context
+            )
+        }
+
         do {
             try context.save()
         } catch {
