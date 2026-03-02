@@ -384,11 +384,19 @@ extension MediaMetadata {
 
 // MARK: - Path Identity
 
-/// Canonical path identity for comparisons. Separates "identity"
-/// (canonical string for set membership, cache keys, equality checks)
-/// from "access" (original URL for file operations and security-scoped
-/// access). Use `canonical()` for comparisons; keep the original URL
-/// for `FileManager` operations.
+/// String-level canonical path for comparisons. Collapses symlinks,
+/// `.`/`..` components, and trailing slashes so that two paths
+/// referring to the same filesystem location via different string
+/// representations compare equal.
+///
+/// **Scope**: This is string canonicalization, not file identity.
+/// It does not unify hard links (different paths, same inode),
+/// case-insensitive equivalents on APFS, Unicode normalization
+/// variants, or security-scoped URL representations. For caches,
+/// set membership, and "did I already process this path" checks,
+/// `PathIdentity` is the right tool. For destructive operations
+/// where physical file identity matters (merge safety, keeper
+/// assertions), prefer content fingerprints or resource identifiers.
 public enum PathIdentity {
     /// Canonical path string for identity comparisons.
     public static func canonical(_ url: URL) -> String {

@@ -48,7 +48,29 @@ public enum BookmarkStore {
         return url
     }
 
-    /// Load all saved bookmark data, keyed by original path.
+    /// Look up bookmark data for a URL. Tries canonical key first,
+    /// then falls back to raw path for legacy entries. Migrates
+    /// legacy keys to canonical on hit.
+    public static func bookmark(for url: URL) -> Data? {
+        var bookmarks = loadAll()
+        let canonical = PathIdentity.canonical(url)
+
+        if let data = bookmarks[canonical] { return data }
+
+        // Legacy fallback: raw path
+        let raw = url.path
+        if raw != canonical, let data = bookmarks[raw] {
+            // Migrate to canonical key
+            bookmarks[canonical] = data
+            bookmarks.removeValue(forKey: raw)
+            UserDefaults.standard.set(bookmarks, forKey: key)
+            return data
+        }
+
+        return nil
+    }
+
+    /// Load all saved bookmark data, keyed by path.
     public static func loadAll() -> [String: Data] {
         UserDefaults.standard.dictionary(forKey: key)?
             .compactMapValues { $0 as? Data } ?? [:]
