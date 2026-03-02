@@ -28,12 +28,20 @@ public struct GroupGridItem: View {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(minHeight: 120, maxHeight: 120)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 120,
+                            maxHeight: 120
+                        )
                         .clipped()
                 } else {
                     Rectangle()
                         .fill(.quaternary.opacity(0.3))
-                        .frame(height: 120)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 120,
+                            maxHeight: 120
+                        )
                         .overlay {
                             Image(systemName: "photo")
                                 .font(.title2)
@@ -86,6 +94,7 @@ public struct GroupGridItem: View {
             }
             .padding(8)
         }
+        .frame(maxWidth: .infinity)
         .background(.background)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
