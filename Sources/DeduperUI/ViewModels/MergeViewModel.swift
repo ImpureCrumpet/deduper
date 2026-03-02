@@ -164,6 +164,11 @@ public final class MergeViewModel {
 
     public var phase: MergePhase = .idle
     public var lastTransaction: MergeTransaction?
+    /// Non-nil when a `.planned` (interrupted) transaction is found on
+    /// session load. The user is prompted to recover (undo) via the UI.
+    public private(set) var interruptedTransaction: MergeTransaction?
+    /// Session the interrupted transaction belongs to.
+    public private(set) var interruptedSessionId: UUID?
 
     private let mergeService = MergeService()
     private let companionResolver = CompanionResolver()
@@ -385,6 +390,40 @@ public final class MergeViewModel {
         }
     }
 
+    /// Recover an interrupted merge (app crashed during execution).
+    /// The `.planned` transaction may have partially moved files to
+    /// quarantine; undo restores whatever was moved.
+    public func undoInterruptedTransaction() {
+        guard let transaction = interruptedTransaction else { return }
+        let logDir = self.logDirectory
+        Task {
+            let failures = await Task.detached {
+                MergeService().undo(transaction: transaction)
+            }.value
+
+            await Task.detached {
+                try? MergeService().markUndone(
+                    transaction: transaction,
+                    logDirectory: logDir
+                )
+            }.value
+
+            if failures.isEmpty {
+                interruptedTransaction = nil
+                interruptedSessionId = nil
+            } else {
+                // Clear the interrupted state anyway — the user
+                // is aware something went wrong; surface via phase.
+                interruptedTransaction = nil
+                interruptedSessionId = nil
+                phase = .undoFailed(
+                    failures: failures,
+                    transaction: transaction
+                )
+            }
+        }
+    }
+
     /// Retry only the SwiftData reconciliation step after
     /// undo already succeeded on the filesystem.
     public func retryReconciliation() {
@@ -424,6 +463,12 @@ public final class MergeViewModel {
             return
         }
 
+        // Clear any stale interrupted-merge state from a prior session.
+        if interruptedSessionId != sessionId {
+            interruptedTransaction = nil
+            interruptedSessionId = nil
+        }
+
         loadTask?.cancel()
         loadEpoch &+= 1
         let expectedEpoch = loadEpoch
@@ -447,6 +492,20 @@ public final class MergeViewModel {
                     sessionId: sessionId,
                     container: container
                 )
+
+                // Surface interrupted merges: a .planned transaction
+                // means the app crashed between WAL write and completion.
+                // Files may be partially quarantined. Offer undo.
+                if let planned = transactions.first(where: {
+                    $0.sessionId == sessionId
+                        && $0.status == .planned
+                        && $0.groupIds != nil
+                }) {
+                    guard expectedEpoch == loadEpoch else { return }
+                    interruptedTransaction = planned
+                    interruptedSessionId = sessionId
+                    lastContainer = container
+                }
 
                 guard let match = transactions.first(where: {
                     $0.sessionId == sessionId

@@ -54,6 +54,25 @@ public struct AppRootView: View {
                 }
             }
             ToolbarItem(placement: .automatic) {
+                if mergeVM.interruptedSessionId
+                    == sessionVM.selectedSessionId,
+                   mergeVM.interruptedTransaction != nil {
+                    Button {
+                        mergeVM.undoInterruptedTransaction()
+                    } label: {
+                        Label(
+                            "Recover Interrupted Merge",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                    }
+                    .help(
+                        "The last merge was interrupted. "
+                        + "Tap to restore any quarantined files."
+                    )
+                    .tint(.orange)
+                }
+            }
+            ToolbarItem(placement: .automatic) {
                 if mergeVM.canUndo,
                    mergeVM.lastMergedSessionId
                        == sessionVM.selectedSessionId {
