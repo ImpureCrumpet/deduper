@@ -151,4 +151,90 @@ struct SessionRemovalTests {
         let entry = makeSession(in: context)
         #expect(entry.isHidden == false)
     }
+
+    // MARK: - Bulk delete
+
+    @Test("deleteSessions hides all specified sessions")
+    func bulkDeleteHidesAll() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let vm = SessionListViewModel()
+        let sid1 = UUID()
+        let sid2 = UUID()
+        let sid3 = UUID()
+        _ = makeSession(in: context, sessionId: sid1)
+        _ = makeSession(in: context, sessionId: sid2)
+        _ = makeSession(in: context, sessionId: sid3)
+
+        vm.sessions = try context.fetch(FetchDescriptor<SessionIndex>())
+        vm.deleteSessions([sid1, sid2], context: context)
+
+        // Both targeted sessions are hidden
+        let all = try context.fetch(FetchDescriptor<SessionIndex>())
+        let hidden = all.filter(\.isHidden)
+        let visible = all.filter { !$0.isHidden }
+        #expect(hidden.count == 2)
+        #expect(visible.count == 1)
+        #expect(visible.first?.sessionId == sid3)
+
+        // vm.sessions only contains the remaining visible session
+        #expect(vm.sessions.count == 1)
+        #expect(vm.sessions.first?.sessionId == sid3)
+    }
+
+    @Test("deleteSessions clears selectedSessionIds for removed sessions")
+    func bulkDeleteClearsSelectionSet() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let vm = SessionListViewModel()
+        let sid1 = UUID()
+        let sid2 = UUID()
+        _ = makeSession(in: context, sessionId: sid1)
+        _ = makeSession(in: context, sessionId: sid2)
+
+        vm.sessions = try context.fetch(FetchDescriptor<SessionIndex>())
+        vm.selectedSessionIds = [sid1, sid2]
+        vm.deleteSessions([sid1, sid2], context: context)
+
+        #expect(vm.selectedSessionIds.isEmpty)
+    }
+
+    @Test("deleteSessions advances selectedSessionId when active is removed")
+    func bulkDeleteAdvancesActiveSession() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let vm = SessionListViewModel()
+        let sid1 = UUID()
+        let sid2 = UUID()
+        let sid3 = UUID()
+        _ = makeSession(in: context, sessionId: sid1)
+        _ = makeSession(in: context, sessionId: sid2)
+        _ = makeSession(in: context, sessionId: sid3)
+
+        vm.sessions = try context.fetch(FetchDescriptor<SessionIndex>())
+        vm.selectedSessionId = sid1
+        vm.deleteSessions([sid1, sid2], context: context)
+
+        // Active session should not be one of the removed sessions
+        #expect(vm.selectedSessionId != sid1)
+        #expect(vm.selectedSessionId != sid2)
+        // Should have advanced to sid3 (the only remaining session)
+        #expect(vm.selectedSessionId == sid3)
+    }
+
+    @Test("deleteSessions with empty set is a no-op")
+    func bulkDeleteEmptySetIsNoOp() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let vm = SessionListViewModel()
+        let sid = UUID()
+        _ = makeSession(in: context, sessionId: sid)
+        vm.sessions = try context.fetch(FetchDescriptor<SessionIndex>())
+
+        vm.deleteSessions([], context: context)
+
+        #expect(vm.sessions.count == 1)
+        let all = try context.fetch(FetchDescriptor<SessionIndex>())
+        #expect(all.first?.isHidden == false)
+    }
 }

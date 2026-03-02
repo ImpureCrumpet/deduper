@@ -14,7 +14,10 @@ public final class SessionListViewModel {
 
     // Published state
     public var sessions: [SessionIndex] = []
+    /// Active session driving the content area (single).
     public var selectedSessionId: UUID?
+    /// Multi-select set for bulk operations (e.g. Remove).
+    public var selectedSessionIds: Set<UUID> = []
     public var isLoading = false
     public var errorMessage: String?
 
@@ -77,6 +80,42 @@ public final class SessionListViewModel {
                     "Failed to hide session: \(error)"
                 )
             }
+        }
+    }
+
+    /// Hide multiple sessions at once. Advances `selectedSessionId`
+    /// to the first remaining visible session if the active session
+    /// is among those removed. Clears `selectedSessionIds` on success.
+    public func deleteSessions(
+        _ ids: Set<UUID>,
+        context: ModelContext
+    ) {
+        guard !ids.isEmpty else { return }
+        var saveNeeded = false
+        for sid in ids {
+            let predicate = sid  // capture
+            let pred = #Predicate<SessionIndex> {
+                $0.sessionId == predicate
+            }
+            if let match = try? context.fetch(
+                FetchDescriptor<SessionIndex>(predicate: pred)
+            ).first {
+                match.isHidden = true
+                saveNeeded = true
+            }
+        }
+        guard saveNeeded else { return }
+        do {
+            try context.save()
+            sessions.removeAll { ids.contains($0.sessionId) }
+            selectedSessionIds.subtract(ids)
+            if let active = selectedSessionId, ids.contains(active) {
+                selectedSessionId = sessions.first?.sessionId
+            }
+        } catch {
+            Self.logger.error(
+                "Failed to hide sessions: \(error)"
+            )
         }
     }
 
