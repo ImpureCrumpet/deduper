@@ -15,6 +15,9 @@ public enum MergeValidationWarning: Sendable, Identifiable {
     case keeperConflict(groupIndex: Int, path: String)
     case protectedPath(groupIndex: Int, path: String)
     case companionIsKeeper(groupIndex: Int, path: String)
+    case samePhysicalFileAsKeeper(
+        groupIndex: Int, keeperPath: String, path: String
+    )
 
     public var id: String {
         switch self {
@@ -26,6 +29,8 @@ public enum MergeValidationWarning: Sendable, Identifiable {
         case .keeperConflict(let i, _): "keeperConflict-\(i)"
         case .protectedPath(let i, _): "protectedPath-\(i)"
         case .companionIsKeeper(let i, _): "companionKeeper-\(i)"
+        case .samePhysicalFileAsKeeper(let i, _, let p):
+            "samePhysical-\(i)-\(p)"
         }
     }
 
@@ -54,6 +59,8 @@ public enum MergeValidationWarning: Sendable, Identifiable {
             "Group \(i): protected system path — \(URL(fileURLWithPath: p).lastPathComponent)"
         case .companionIsKeeper(let i, let p):
             "Group \(i): companion is keeper elsewhere — \(URL(fileURLWithPath: p).lastPathComponent)"
+        case .samePhysicalFileAsKeeper(let i, _, let p):
+            "Group \(i): hard link / alias of keeper — move removes link, not storage — \(URL(fileURLWithPath: p).lastPathComponent)"
         }
     }
 }
@@ -657,6 +664,11 @@ public final class MergeViewModel {
             var warnings = group.warnings
             var missingCount = 0
 
+            // Resolve keeper physical identity once per group
+            let keeperIdentity = FileIdentity.resolve(
+                URL(fileURLWithPath: group.keeperPath)
+            )
+
             for path in group.nonKeeperPaths {
                 let canonical = canonicalize(path)
 
@@ -680,6 +692,17 @@ public final class MergeViewModel {
                 ) else {
                     missingCount += 1
                     continue
+                }
+
+                // Hard-link / alias check (warn-only)
+                if let ki = keeperIdentity,
+                   let ci = FileIdentity.resolve(url),
+                   FileIdentity.same(ki, ci) {
+                    warnings.append(.samePhysicalFileAsKeeper(
+                        groupIndex: group.groupIndex,
+                        keeperPath: group.keeperPath,
+                        path: path
+                    ))
                 }
 
                 // Protected path check

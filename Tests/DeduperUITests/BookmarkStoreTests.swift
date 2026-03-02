@@ -3,7 +3,7 @@ import Foundation
 @testable import DeduperUI
 @testable import DeduperKit
 
-@Suite("BookmarkStore")
+@Suite("BookmarkStore", .serialized)
 struct BookmarkStoreTests {
 
     /// Unique UserDefaults key used by BookmarkStore.

@@ -124,13 +124,39 @@ struct Merge: AsyncParsableCommand {
         // Resolve companions for all files
         let companionResolver = CompanionResolver()
         var assets: [AssetBundle] = []
+        var cliWarnings: [(
+            groupIndex: Int, keeperPath: String,
+            path: String, reason: String
+        )] = []
 
         for group in selectedGroups {
+            // Resolve keeper identity once per group
+            let keeperIdentity = group.keeperPath.flatMap {
+                FileIdentity.resolve(URL(fileURLWithPath: $0))
+            }
+            let idx = group.groupIndex > 0
+                ? group.groupIndex : 0
+
             for path in group.memberPaths {
                 if PathIdentity.canonical(path)
                     != group.keeperPath
                         .map(PathIdentity.canonical(_:)) {
                     let url = URL(fileURLWithPath: path)
+
+                    // Hard-link / alias check
+                    if let ki = keeperIdentity,
+                       let ci = FileIdentity.resolve(url),
+                       FileIdentity.same(ki, ci) {
+                        cliWarnings.append((
+                            groupIndex: idx,
+                            keeperPath: group.keeperPath ?? "",
+                            path: path,
+                            reason: "hard link / alias of keeper"
+                                + " — move removes link,"
+                                + " not storage"
+                        ))
+                    }
+
                     let companionSet = companionResolver.resolve(
                         for: url
                     )
@@ -188,6 +214,22 @@ struct Merge: AsyncParsableCommand {
                         )
                     }
                 }
+            }
+            print()
+        }
+
+        if !cliWarnings.isEmpty {
+            print("Warnings:")
+            for w in cliWarnings.sorted(
+                by: { $0.groupIndex < $1.groupIndex }
+            ) {
+                print(
+                    "  WARN: Group \(w.groupIndex):"
+                    + " \(w.path) — \(w.reason)"
+                )
+                print(
+                    "        keeper: \(w.keeperPath)"
+                )
             }
             print()
         }

@@ -237,15 +237,6 @@ extension URL {
         return path.range(of: regex, options: .regularExpression) != nil
     }
 
-    /// Get the file resource identifier for tracking hardlinks
-    var fileResourceIdentifier: String? {
-        guard let values = try? resourceValues(forKeys: [.fileResourceIdentifierKey]),
-              let identifier = values.fileResourceIdentifier else {
-            return nil
-        }
-        return identifier.debugDescription
-    }
-
     /// Check if this is an iCloud placeholder
     var isICloudPlaceholder: Bool {
         guard let values = try? resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]) else {
