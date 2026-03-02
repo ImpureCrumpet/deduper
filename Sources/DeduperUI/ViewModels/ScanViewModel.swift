@@ -17,6 +17,8 @@ public final class ScanViewModel {
     public var filesScanned: Int = 0
     public var errorMessage: String?
     public var exactOnly: Bool = true
+    public var threshold: Double = 0.85
+    public var includeVideos: Bool = false
 
     private var scanTask: Task<UUID?, Never>?
 
@@ -45,12 +47,16 @@ public final class ScanViewModel {
 
         let dirs = selectedDirectories
         let exact = exactOnly
+        let thresholdVal = threshold
+        let videos = includeVideos
 
         scanTask = Task {
             do {
                 let orchestrator = ScanOrchestrator()
                 let options = ScanOrchestrator.Options(
-                    exactOnly: exact
+                    exactOnly: exact,
+                    threshold: thresholdVal,
+                    includeVideos: videos
                 )
 
                 let result = try await orchestrator.run(

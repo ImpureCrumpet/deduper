@@ -104,6 +104,30 @@ public struct ScanSheet: View {
                 isOn: $viewModel.exactOnly
             )
             .toggleStyle(.checkbox)
+
+            if !viewModel.exactOnly {
+                HStack {
+                    Text("Similarity threshold")
+                    Slider(
+                        value: $viewModel.threshold,
+                        in: 0.5...1.0,
+                        step: 0.05
+                    )
+                    Text(String(
+                        format: "%.0f%%",
+                        viewModel.threshold * 100
+                    ))
+                    .monospacedDigit()
+                    .frame(width: 40, alignment: .trailing)
+                }
+                .padding(.leading, 20)
+            }
+
+            Toggle(
+                "Include videos (slower)",
+                isOn: $viewModel.includeVideos
+            )
+            .toggleStyle(.checkbox)
         }
     }
 
