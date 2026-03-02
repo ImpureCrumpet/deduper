@@ -95,11 +95,11 @@ public enum MergeValidationWarning: Sendable, Identifiable {
         case .samePhysicalFileAsKeeper(let i, _, let p):
             "Group \(i): hard link / alias of keeper — move removes link, not storage — \(URL(fileURLWithPath: p).lastPathComponent)"
         case .renameCollision(let i, _, let t):
-            "Group \(i): rename target '\(t)' already exists — rename skipped"
+            "Group \(i): rename target '\(t)' already exists — rename omitted"
         case .renameCollisionResolved(let i, _, let t, let r):
             "Group \(i): rename target '\(t)' in use — resolved to '\(r)'"
         case .renameBlocked(let i, _, let t):
-            "Group \(i): rename target '\(t)' in use — group excluded (block policy)"
+            "Group \(i): rename target '\(t)' in use — group excluded (Block policy)"
         case .renameInvalidTarget(let i, _, let t, let reason):
             "Group \(i): rename target '\(t)' is invalid — \(reason)"
         case .renameCollisionExhausted(let i, _, let t):
@@ -1470,6 +1470,14 @@ public final class MergeViewModel {
         // stem matching, so companions get the same suffix
         let resolvedFileName = resolvedName
 
+        // localReserved tracks targets claimed within this group
+        // (keeper + companions) to prevent within-group collisions.
+        let keeperTargetPath = dir.appendingPathComponent(
+            resolvedName
+        ).path
+        var localReserved = Set<String>()
+        localReserved.insert(canonicalize(keeperTargetPath))
+
         // Resolve keeper's companions for atomic rename.
         // Option 1: companion collisions skip that companion only
         // (not block the entire group). The keeper rename proceeds.
@@ -1488,40 +1496,105 @@ public final class MergeViewModel {
                 keeperFileName: resolvedFileName,
                 companionFileName: comp.url.lastPathComponent
             )
-            let compNewURL = dir.appendingPathComponent(compNewName)
-            let compCanonicalTarget = canonicalize(compNewURL.path)
 
-            // Companion collision check (advisory, best-effort)
-            let compExistsOnDisk = FileManager.default.fileExists(
-                atPath: compNewURL.path
-            ) && !movePaths.contains(compCanonicalTarget)
-            let compHasCollision = compExistsOnDisk
-                || reservedTargets.contains(compCanonicalTarget)
-
-            if compHasCollision {
-                // Option 1: skip this companion rename, warn
-                warnings.append(.renameCollision(
+            // Validate companion name
+            let compTrimmed = compNewName.trimmingCharacters(
+                in: .whitespaces
+            )
+            if compTrimmed.isEmpty || compTrimmed == "."
+                || compTrimmed == ".."
+                || compNewName.contains("/")
+                || compNewName.contains("\0")
+            {
+                warnings.append(.renameInvalidTarget(
                     groupIndex: group.groupIndex,
                     path: comp.url.path,
-                    targetName: compNewName
+                    targetName: compNewName,
+                    reason: "invalid companion name"
                 ))
                 continue
             }
 
+            var compTargetURL = dir.appendingPathComponent(
+                compNewName
+            )
+
+            // No-op after canonicalization
+            if canonicalize(comp.url.path)
+                == canonicalize(compTargetURL.path) {
+                continue
+            }
+
+            // Protected path guard (parity with keeper)
+            if isProtectedPath(comp.url)
+                || isProtectedPath(compTargetURL)
+            {
+                warnings.append(.protectedPath(
+                    groupIndex: group.groupIndex,
+                    path: compTargetURL.path
+                ))
+                continue
+            }
+
+            // Collision check: filesystem + cross-group +
+            // within-group (localReserved).
+            let compCanonicalTarget = canonicalize(
+                compTargetURL.path
+            )
+            let compExistsOnDisk = FileManager.default.fileExists(
+                atPath: compTargetURL.path
+            ) && !movePaths.contains(compCanonicalTarget)
+            let compHasCollision = compExistsOnDisk
+                || reservedTargets.contains(compCanonicalTarget)
+                || localReserved.contains(compCanonicalTarget)
+
+            var finalCompName = compNewName
+            if compHasCollision {
+                switch template.collisionPolicy {
+                case .appendNumber:
+                    let candidate = resolveCollisionName(
+                        dir: dir,
+                        newName: compNewName,
+                        reserved: reservedTargets.union(localReserved),
+                        vacated: movePaths
+                    )
+                    if candidate == compNewName {
+                        warnings.append(.renameCollisionExhausted(
+                            groupIndex: group.groupIndex,
+                            path: comp.url.path,
+                            targetName: compNewName
+                        ))
+                        continue
+                    }
+                    warnings.append(.renameCollisionResolved(
+                        groupIndex: group.groupIndex,
+                        path: comp.url.path,
+                        targetName: compNewName,
+                        resolvedName: candidate
+                    ))
+                    finalCompName = candidate
+                case .skip, .block:
+                    // Option 1: do not block group for companion
+                    // collision — skip this companion only.
+                    warnings.append(.renameCollision(
+                        groupIndex: group.groupIndex,
+                        path: comp.url.path,
+                        targetName: compNewName
+                    ))
+                    continue
+                }
+            }
+
+            compTargetURL = dir.appendingPathComponent(finalCompName)
+            localReserved.insert(canonicalize(compTargetURL.path))
             companionRenames.append(.init(
                 originalPath: comp.url.path,
-                targetPath: compNewURL.path
+                targetPath: compTargetURL.path
             ))
         }
 
         // Reserve all targets atomically for cross-group dedup
-        let keeperTargetPath = dir.appendingPathComponent(
-            resolvedName
-        ).path
-        reservedTargets.insert(canonicalize(keeperTargetPath))
-        for comp in companionRenames {
-            reservedTargets.insert(canonicalize(comp.targetPath))
-        }
+        reservedTargets.formUnion(localReserved)
 
         return KeeperRename(
             originalPath: group.keeperPath,
