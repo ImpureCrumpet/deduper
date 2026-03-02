@@ -103,6 +103,12 @@ public struct MergeSheet: View {
                                 systemImage: "paperclip"
                             )
                         }
+                        if plan.renameCount > 0 {
+                            Label(
+                                "\(plan.renameCount) rename\(plan.renameCount == 1 ? "" : "s")",
+                                systemImage: "pencil"
+                            )
+                        }
                     }
                     .font(.headline)
 
@@ -201,59 +207,99 @@ public struct MergeSheet: View {
     private func completedContent(
         transaction: MergeTransaction
     ) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let moveEntries = transaction.entries.filter {
+            $0.operation == .move && $0.status == .completed
+        }
+        let renameEntries = transaction.entries.filter {
+            $0.operation == .rename && $0.status == .completed
+        }
+        let moveErrors = transaction.errors.filter {
+            $0.operation == .move
+        }
+        let renameErrors = transaction.errors.filter {
+            $0.operation == .rename
+        }
+
+        return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                Label(
-                    "Merge Complete",
-                    systemImage: "checkmark.circle.fill"
-                )
-                .font(.headline)
-                .foregroundStyle(.green)
+                if moveErrors.isEmpty {
+                    Label(
+                        "Merge Complete",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .font(.headline)
+                    .foregroundStyle(.green)
+                } else {
+                    Label(
+                        "Merge Incomplete",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                }
 
                 HStack(spacing: 16) {
                     Label(
-                        "\(transaction.filesMoved) files moved",
-                        systemImage: "doc"
+                        "\(moveEntries.count) quarantined",
+                        systemImage: "archivebox"
                     )
-                    if transaction.errorCount > 0 {
+                    if !renameEntries.isEmpty {
                         Label(
-                            "\(transaction.errorCount) errors",
-                            systemImage: "exclamationmark.triangle"
+                            "\(renameEntries.count) renamed",
+                            systemImage: "pencil"
                         )
-                        .foregroundStyle(.orange)
                     }
                 }
                 .font(.subheadline)
 
-                Text(
-                    "Files have been moved to quarantine."
-                        + " You can undo this operation to restore"
-                        + " them."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                if !moveErrors.isEmpty {
+                    Text(
+                        "Some files could not be quarantined."
+                            + " Decisions remain approved for"
+                            + " retry."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if !renameErrors.isEmpty {
+                    Text(
+                        "Files quarantined successfully."
+                            + " Some keeper renames failed"
+                            + " — use Undo to restore and retry."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(
+                        "Files have been moved to quarantine."
+                            + " You can undo this operation to"
+                            + " restore them."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
             .padding()
 
             if !transaction.errors.isEmpty {
                 Divider()
                 List {
-                    Section("Errors") {
-                        ForEach(
-                            transaction.errors,
-                            id: \.originalPath
-                        ) { error in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(
-                                    URL(
-                                        fileURLWithPath:
-                                            error.originalPath
-                                    ).lastPathComponent
-                                )
-                                .font(.caption.monospaced())
-                                Text(error.reason)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                    if !moveErrors.isEmpty {
+                        Section("Move Errors") {
+                            ForEach(
+                                moveErrors,
+                                id: \.originalPath
+                            ) { error in
+                                errorRow(error)
+                            }
+                        }
+                    }
+                    if !renameErrors.isEmpty {
+                        Section("Rename Errors (non-blocking)") {
+                            ForEach(
+                                renameErrors,
+                                id: \.originalPath
+                            ) { error in
+                                errorRow(error)
                             }
                         }
                     }
@@ -261,6 +307,23 @@ public struct MergeSheet: View {
                 .listStyle(.inset)
             }
         }
+    }
+
+    private func errorRow(
+        _ error: MergeTransaction.Error
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(
+                URL(
+                    fileURLWithPath: error.originalPath
+                ).lastPathComponent
+            )
+            .font(.caption.monospaced())
+            Text(error.reason)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .textSelection(.enabled)
     }
 
     private func failedContent(message: String) -> some View {
@@ -319,22 +382,63 @@ public struct MergeSheet: View {
                 Text("Group \(item.groupIndex)")
                     .font(.caption.bold())
                 Spacer()
-                Text("\(item.totalFiles) files")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text("\(item.totalFiles) files")
+                    if item.keeperRename != nil {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
-            Text(
-                URL(fileURLWithPath: item.keeperPath)
-                    .lastPathComponent
-            )
-            .font(.caption2.monospaced())
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
+            // Keeper path (original or rename arrow)
+            if let rename = item.keeperRename {
+                renameRow(rename: rename)
+            } else {
+                Text(
+                    URL(fileURLWithPath: item.keeperPath)
+                        .lastPathComponent
+                )
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            }
 
             ForEach(item.warnings) { warning in
                 warningBadge(warning)
+            }
+        }
+    }
+
+    private func renameRow(rename: KeeperRename) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(
+                    URL(fileURLWithPath: rename.originalPath)
+                        .lastPathComponent
+                )
+                Image(systemName: "arrow.right")
+                    .font(.caption2)
+                Text(
+                    URL(fileURLWithPath: rename.targetPath)
+                        .lastPathComponent
+                )
+                .foregroundStyle(.blue)
+            }
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+            if !rename.companionRenames.isEmpty {
+                Text(
+                    "+ \(rename.companionRenames.count)"
+                        + " companion\(rename.companionRenames.count == 1 ? "" : "s")"
+                        + " renamed"
+                )
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
         }
     }

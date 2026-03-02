@@ -131,6 +131,11 @@ public struct MergePlan: Sendable {
             }
         }
     }
+
+    /// Count of groups that include a keeper rename.
+    public var renameCount: Int {
+        items.filter { $0.keeperRename != nil }.count
+    }
 }
 
 /// Phase of the merge flow state machine.
@@ -455,6 +460,13 @@ public final class MergeViewModel {
                 lastMergedSessionId = sessionId
                 lastContainer = container
                 lastMergedGroupIds = match.groupIds
+
+                // Crash-consistency: reconcile SwiftData paths
+                // with rename entries from the persisted tx.
+                reconcileRenamePaths(
+                    transaction: match,
+                    container: container
+                )
             } catch is CancellationError {
                 // Normal cancellation
             } catch {
@@ -562,6 +574,94 @@ public final class MergeViewModel {
                 member.fileName = URL(
                     fileURLWithPath: newPath
                 ).lastPathComponent
+            }
+        }
+    }
+
+    /// Crash-consistency: if the app crashed between filesystem
+    /// rename and SwiftData rewrite, reconcile paths from the
+    /// persisted transaction. Idempotent — skips paths that
+    /// already match the expected state.
+    private func reconcileRenamePaths(
+        transaction: MergeTransaction,
+        container: ModelContainer
+    ) {
+        let fwdMap = renameMap(from: transaction)
+        guard !fwdMap.isEmpty else { return }
+
+        // Determine which direction to apply based on tx status
+        let pathMap: [String: String]
+        switch transaction.status {
+        case .completed:
+            // Rename happened — SwiftData should have new paths
+            pathMap = fwdMap
+        case .undone:
+            // Undo reversed renames — SwiftData should have old
+            var rev: [String: String] = [:]
+            for (old, new) in fwdMap { rev[new] = old }
+            pathMap = rev
+        default:
+            return  // purged or unknown — no reconciliation
+        }
+
+        let context = ModelContext(container)
+        let sid = lastMergedSessionId ?? transaction.sessionId
+            ?? UUID()
+        var changed = false
+
+        // Reconcile ReviewDecision.selectedKeeperPath
+        if let groupIds = transaction.groupIds {
+            for gid in groupIds {
+                let id = gid
+                let pred = #Predicate<ReviewDecision> {
+                    $0.groupId == id
+                }
+                var desc = FetchDescriptor<ReviewDecision>(
+                    predicate: pred
+                )
+                desc.fetchLimit = 1
+                guard let decision = try? context.fetch(desc)
+                    .first else { continue }
+                if let current = decision.selectedKeeperPath,
+                   let target = pathMap[current] {
+                    decision.selectedKeeperPath = target
+                    changed = true
+                }
+            }
+        }
+
+        // Reconcile GroupMember.filePath
+        for (source, target) in pathMap {
+            let src = source
+            let sessionId = sid
+            let pred = #Predicate<GroupMember> {
+                $0.sessionId == sessionId && $0.filePath == src
+            }
+            let desc = FetchDescriptor<GroupMember>(
+                predicate: pred
+            )
+            guard let members = try? context.fetch(desc) else {
+                continue
+            }
+            for member in members {
+                member.filePath = target
+                member.fileName = URL(
+                    fileURLWithPath: target
+                ).lastPathComponent
+                changed = true
+            }
+        }
+
+        if changed {
+            do {
+                try context.save()
+                Self.logger.info(
+                    "Reconciled rename paths from persisted tx"
+                )
+            } catch {
+                Self.logger.error(
+                    "Failed to reconcile rename paths: \(error)"
+                )
             }
         }
     }
