@@ -14,9 +14,12 @@ public enum FileIdentity {
 
     /// Resolved resource identifiers for a single file.
     /// Compute once per keeper, then compare against each candidate.
-    /// `@unchecked Sendable` because the contained NSObjects are
-    /// immutable opaque identifiers from the filesystem.
-    public struct ResolvedIdentity: @unchecked Sendable {
+    ///
+    /// **Not Sendable**: contains opaque NSObjects that lack a
+    /// Sendable guarantee. Use only within synchronous plan-building
+    /// code. If a concurrency boundary is needed later, introduce
+    /// an explicit serialized representation with justification.
+    public struct ResolvedIdentity {
         let fileId: NSObject
         let volumeId: NSObject
     }
