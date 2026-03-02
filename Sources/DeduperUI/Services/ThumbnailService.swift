@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import DeduperKit
 import QuickLookThumbnailing
 import os
 
@@ -110,7 +111,8 @@ public actor ThumbnailService {
     private func cacheKey(
         path: String, size: ThumbnailSize
     ) -> String {
-        "\(path)_\(Int(size.width))x\(Int(size.height))"
+        let canonical = PathIdentity.canonical(path)
+        return "\(canonical)_\(Int(size.width))x\(Int(size.height))"
     }
 
     private func diskPath(for key: String) -> URL {

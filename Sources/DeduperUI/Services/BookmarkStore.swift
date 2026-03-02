@@ -1,4 +1,5 @@
 import Foundation
+import DeduperKit
 
 /// Stores security-scoped bookmarks for user-selected directories.
 /// Works in non-sandboxed mode today; becomes mandatory if sandboxed.
@@ -14,7 +15,13 @@ public enum BookmarkStore {
         )
 
         var bookmarks = loadAll()
-        bookmarks[url.path] = data
+        let canonical = PathIdentity.canonical(url)
+        bookmarks[canonical] = data
+        // Remove legacy raw-path entry if different from canonical
+        let raw = url.path
+        if raw != canonical {
+            bookmarks.removeValue(forKey: raw)
+        }
         UserDefaults.standard.set(bookmarks, forKey: key)
 
         return data

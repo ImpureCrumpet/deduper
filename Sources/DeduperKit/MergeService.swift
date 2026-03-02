@@ -377,9 +377,11 @@ public struct MergeService: Sendable {
     // MARK: - Protected Paths
 
     private func isProtectedPath(_ url: URL) -> Bool {
-        let path = url.path
+        let path = PathIdentity.canonical(url)
+        // Use specific prefixes to avoid over-blocking under
+        // /System/Volumes/Data (macOS firmlinks to user space).
         let protectedPrefixes = [
-            "/System", "/Library", "/usr",
+            "/System/Library", "/usr", "/Library",
             "/bin", "/sbin", "/Applications",
             "/private/var"
         ]

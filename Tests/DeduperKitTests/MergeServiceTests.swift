@@ -53,7 +53,7 @@ struct MergeServiceTests {
 
         let logDir = dir.appendingPathComponent("logs")
         let protectedFile = URL(
-            fileURLWithPath: "/System/fake.jpg"
+            fileURLWithPath: "/System/Library/fake.jpg"
         )
 
         let transaction = try service.moveToTrash(
@@ -581,5 +581,54 @@ struct MergeServiceTests {
                 transaction: undone, logDirectory: logDir
             )
         }
+    }
+
+    // MARK: - Protected Path Regression
+
+    @Test("Temp directory files are not classified as protected")
+    func tempDirNotProtected() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+
+        let file = dir.appendingPathComponent("safe-file.jpg")
+        try Data("content".utf8).write(to: file)
+
+        let asset = AssetBundle(primary: file, companions: [])
+        // Should succeed — temp dir is not a protected path.
+        let tx = try service.moveToQuarantine(
+            assets: [asset],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+        #expect(tx.entries.count == 1)
+        #expect(tx.errors.isEmpty)
+    }
+
+    @Test("Home directory files are not classified as protected")
+    func homeDirNotProtected() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(
+            ".deduper-test-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        defer { cleanup(dir) }
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+
+        let file = dir.appendingPathComponent("safe-file.jpg")
+        try Data("content".utf8).write(to: file)
+
+        let asset = AssetBundle(primary: file, companions: [])
+        let tx = try service.moveToQuarantine(
+            assets: [asset],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+        #expect(tx.entries.count == 1)
+        #expect(tx.errors.isEmpty)
     }
 }

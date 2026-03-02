@@ -116,6 +116,8 @@ public struct ArtifactMaterializer: Sendable {
                 }
             } else {
                 // V1 fallback: parallel arrays
+                let canonicalKeeper = group.keeperPath
+                    .map(PathIdentity.canonical(_:))
                 for (idx, path) in group.memberPaths.enumerated() {
                     let size = idx < group.memberSizes.count
                         ? group.memberSizes[idx] : 0
@@ -128,7 +130,8 @@ public struct ArtifactMaterializer: Sendable {
                         fileName: URL(fileURLWithPath: path)
                             .lastPathComponent,
                         fileSize: size,
-                        isKeeper: group.keeperPath == path,
+                        isKeeper: canonicalKeeper
+                            == PathIdentity.canonical(path),
                         materializationRunId: newRunId,
                         confidence: nil,
                         signalsJSON: nil,

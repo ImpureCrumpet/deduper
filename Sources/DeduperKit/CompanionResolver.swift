@@ -40,7 +40,8 @@ public struct CompanionResolver: Sendable {
                 .appendingPathComponent(stem)
                 .appendingPathExtension(ext)
             if FileManager.default.fileExists(atPath: candidate.path),
-               candidate != primaryURL {
+               PathIdentity.canonical(candidate)
+                    != PathIdentity.canonical(primaryURL) {
                 companions.append(CompanionFile(
                     url: candidate,
                     relationship: .sidecar(ext)

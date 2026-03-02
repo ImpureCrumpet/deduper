@@ -102,7 +102,9 @@ struct Show: AsyncParsableCommand {
                 ? group.groupIndex : 0
             print("Group \(idx) (\(confidence) confidence):")
             for (i, path) in group.memberPaths.enumerated() {
-                let isKeeper = path == group.keeperPath
+                let isKeeper = PathIdentity.canonical(path)
+                    == group.keeperPath
+                        .map(PathIdentity.canonical(_:))
                 let label = isKeeper ? " [KEEP]" : ""
                 let size: String
                 if i < group.memberSizes.count {

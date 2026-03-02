@@ -127,7 +127,9 @@ struct Merge: AsyncParsableCommand {
 
         for group in selectedGroups {
             for path in group.memberPaths {
-                if path != group.keeperPath {
+                if PathIdentity.canonical(path)
+                    != group.keeperPath
+                        .map(PathIdentity.canonical(_:)) {
                     let url = URL(fileURLWithPath: path)
                     let companionSet = companionResolver.resolve(
                         for: url
@@ -169,7 +171,9 @@ struct Merge: AsyncParsableCommand {
                 ? group.groupIndex : 0
             print("Group \(idx) (\(confidence)):")
             for path in group.memberPaths {
-                let isKeeper = path == group.keeperPath
+                let isKeeper = PathIdentity.canonical(path)
+                    == group.keeperPath
+                        .map(PathIdentity.canonical(_:))
                 let label = isKeeper ? " [KEEP]" : " [TRASH]"
                 print("  \(path)\(label)")
                 if !isKeeper {
