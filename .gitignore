@@ -1,6 +1,24 @@
+# Swift / SPM
 .build/
 .swiftpm/
+Package.resolved
+
+# Xcode
 *.xcodeproj/
 xcuserdata/
 DerivedData/
+
+# Build output
+build/
+
+# macOS
 .DS_Store
+
+# Claude Code
+.claude/hooks/
+.claude/logs/
+.claude/settings.local.json
+.claude/worktrees/
+
+# Temporary files
+tmp/
