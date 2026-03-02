@@ -631,4 +631,253 @@ struct MergeServiceTests {
         #expect(tx.entries.count == 1)
         #expect(tx.errors.isEmpty)
     }
+
+    // MARK: - Rename Entry Tests
+
+    @Test("Rename entry in transaction renames file on disk")
+    func renameEntryRenamesFile() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("keeper.heic")
+        try Data("keeper content".utf8).write(to: file)
+        let target = dir.appendingPathComponent("Best_keeper.heic")
+
+        let rename = KeeperRenameRequest(
+            from: file, to: target
+        )
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: [rename],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // File renamed on disk
+        #expect(
+            !FileManager.default.fileExists(atPath: file.path)
+        )
+        #expect(
+            FileManager.default.fileExists(atPath: target.path)
+        )
+
+        // Entry has correct operation and renamedFrom
+        let renameEntries = transaction.entries.filter {
+            $0.operation == .rename
+        }
+        #expect(renameEntries.count == 1)
+        #expect(renameEntries[0].renamedFrom == file.path)
+        #expect(renameEntries[0].originalPath == target.path)
+        #expect(renameEntries[0].trashedPath == nil)
+    }
+
+    @Test("Undo reverses rename back to original name")
+    func undoReversesRename() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("keeper.heic")
+        try Data("keeper content".utf8).write(to: file)
+        let target = dir.appendingPathComponent("Best_keeper.heic")
+
+        let rename = KeeperRenameRequest(
+            from: file, to: target
+        )
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: [rename],
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Undo should reverse the rename
+        let failures = service.undo(transaction: transaction)
+        #expect(failures.isEmpty)
+
+        // Original name restored
+        #expect(
+            FileManager.default.fileExists(atPath: file.path)
+        )
+        #expect(
+            !FileManager.default.fileExists(atPath: target.path)
+        )
+    }
+
+    @Test("Purge skips rename entries without error")
+    func purgeSkipsRenameEntries() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+
+        // Create a file to quarantine and a keeper to rename
+        let nonKeeper = dir.appendingPathComponent("dup.heic")
+        try Data("duplicate".utf8).write(to: nonKeeper)
+        let keeper = dir.appendingPathComponent("keeper.heic")
+        try Data("keeper".utf8).write(to: keeper)
+        let renamedKeeper = dir.appendingPathComponent(
+            "Best_keeper.heic"
+        )
+
+        let assets = [AssetBundle(primary: nonKeeper)]
+        let renames = [
+            KeeperRenameRequest(from: keeper, to: renamedKeeper)
+        ]
+        let transaction = try service.moveToQuarantine(
+            assets: assets,
+            renames: renames,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Should have both move and rename entries
+        let moveCount = transaction.entries.filter {
+            $0.operation == .move
+        }.count
+        let renameCount = transaction.entries.filter {
+            $0.operation == .rename
+        }.count
+        #expect(moveCount == 1)
+        #expect(renameCount == 1)
+
+        // Purge should only delete the quarantined file
+        let deleted = try service.purge(
+            transaction: transaction, logDirectory: logDir
+        )
+        #expect(deleted == 1)
+
+        // Renamed keeper still exists at new name
+        #expect(
+            FileManager.default.fileExists(
+                atPath: renamedKeeper.path
+            )
+        )
+    }
+
+    @Test("Backward compat: entry without operation decodes as .move")
+    func entryWithoutOperationDecodesAsMove() throws {
+        // Simulate a pre-rename transaction log entry
+        let json = """
+        {
+            "originalPath": "/a/b.jpg",
+            "trashedPath": "/quarantine/b.jpg",
+            "isCompanion": false,
+            "status": "completed"
+        }
+        """.data(using: .utf8)!
+
+        let entry = try JSONDecoder().decode(
+            MergeTransaction.Entry.self, from: json
+        )
+
+        #expect(entry.operation == .move)
+        #expect(entry.renamedFrom == nil)
+    }
+
+    @Test("Companion rename entries are marked as companion")
+    func companionRenameMarkedAsCompanion() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let keeper = dir.appendingPathComponent("IMG.heic")
+        let sidecar = dir.appendingPathComponent("IMG.aae")
+        try Data("photo".utf8).write(to: keeper)
+        try Data("sidecar".utf8).write(to: sidecar)
+
+        let renamedKeeper = dir.appendingPathComponent(
+            "Best_IMG.heic"
+        )
+        let renamedSidecar = dir.appendingPathComponent(
+            "Best_IMG.aae"
+        )
+
+        let renames = [
+            KeeperRenameRequest(
+                from: keeper, to: renamedKeeper
+            ),
+            KeeperRenameRequest(
+                from: sidecar, to: renamedSidecar,
+                isCompanion: true
+            )
+        ]
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: renames,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        let renameEntries = transaction.entries.filter {
+            $0.operation == .rename
+        }
+        #expect(renameEntries.count == 2)
+
+        let primaryRename = renameEntries.first {
+            !$0.isCompanion
+        }
+        let companionRename = renameEntries.first {
+            $0.isCompanion
+        }
+        #expect(primaryRename != nil)
+        #expect(companionRename != nil)
+        #expect(
+            companionRename?.renamedFrom == sidecar.path
+        )
+
+        // Both files renamed on disk
+        #expect(
+            FileManager.default.fileExists(
+                atPath: renamedKeeper.path
+            )
+        )
+        #expect(
+            FileManager.default.fileExists(
+                atPath: renamedSidecar.path
+            )
+        )
+    }
+
+    @Test("Rename entries in WAL planned log before execution")
+    func renameInWalPlannedLog() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+        let file = dir.appendingPathComponent("keeper.heic")
+        try Data("content".utf8).write(to: file)
+        let target = dir.appendingPathComponent("Renamed.heic")
+
+        let renames = [
+            KeeperRenameRequest(from: file, to: target)
+        ]
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: renames,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Read journal to verify "planned" preceded "renamed"
+        let journalPath = logDir.appendingPathComponent(
+            "merge-\(transaction.id.uuidString).journal.ndjson"
+        )
+        let journal = try String(
+            contentsOf: journalPath, encoding: .utf8
+        )
+        let lines = journal.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+
+        // First line: planned, then renamed, then completed
+        #expect(lines[0].contains("planned"))
+        #expect(lines[1].contains("renamed:"))
+        #expect(lines[2].contains("completed"))
+    }
 }

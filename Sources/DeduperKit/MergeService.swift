@@ -14,8 +14,13 @@ public struct MergeService: Sendable {
     /// Each asset is a primary file plus its companion files.
     /// Companions of the keeper are preserved; companions of non-keepers
     /// are trashed along with the non-keeper.
+    ///
+    /// Optional `renames` execute after quarantine moves complete.
+    /// Each rename is journaled as a separate `.rename` entry in the
+    /// transaction. Rename failures are non-fatal (logged as errors).
     public func moveToQuarantine(
         assets: [AssetBundle],
+        renames: [KeeperRenameRequest] = [],
         sessionId: UUID? = nil,
         groupIds: [UUID]? = nil,
         logDirectory: URL? = nil,
@@ -45,6 +50,18 @@ public struct MergeService: Sendable {
                     status: .planned
                 ))
             }
+        }
+
+        // Planned entries for renames
+        for rename in renames {
+            plannedEntries.append(.init(
+                originalPath: rename.to.path,
+                trashedPath: nil,
+                isCompanion: rename.isCompanion,
+                status: .planned,
+                operation: .rename,
+                renamedFrom: rename.from.path
+            ))
         }
 
         let journalPath = logDir.appendingPathComponent(
@@ -119,6 +136,39 @@ public struct MergeService: Sendable {
                         "Failed to quarantine \(file.lastPathComponent): \(error.localizedDescription)"
                     )
                 }
+            }
+        }
+
+        // Execute keeper renames (after quarantine moves)
+        for rename in renames {
+            do {
+                try FileManager.default.moveItem(
+                    at: rename.from, to: rename.to
+                )
+                completedEntries.append(.init(
+                    originalPath: rename.to.path,
+                    trashedPath: nil,
+                    isCompanion: rename.isCompanion,
+                    status: .completed,
+                    operation: .rename,
+                    renamedFrom: rename.from.path
+                ))
+                try writeJournalEntry(
+                    "renamed:\(rename.from.path)"
+                        + "->\(rename.to.path)",
+                    txId: txId, to: journalPath
+                )
+                logger.info(
+                    "Renamed: \(rename.from.lastPathComponent) -> \(rename.to.lastPathComponent)"
+                )
+            } catch {
+                errors.append(.init(
+                    originalPath: rename.from.path,
+                    reason: "Rename failed: \(error.localizedDescription)"
+                ))
+                logger.error(
+                    "Failed to rename \(rename.from.lastPathComponent): \(error.localizedDescription)"
+                )
             }
         }
 
@@ -265,12 +315,40 @@ public struct MergeService: Sendable {
     // MARK: - Undo
 
     /// Undo a merge by restoring files from quarantine or trash.
-    /// Restores primary files first, then companions.
+    /// Reverses renames first (Phase 0), then restores quarantined
+    /// files with primaries before companions (Phase 1).
     public func undo(transaction: MergeTransaction) -> [String] {
         var failures: [String] = []
 
-        // Restore in reverse order: primaries first, then companions
-        let sorted = transaction.entries.sorted { a, b in
+        // Phase 0: Reverse renames before restoring quarantined files
+        let renameEntries = transaction.entries.filter {
+            $0.operation == .rename
+        }
+        for entry in renameEntries {
+            guard let oldPath = entry.renamedFrom else { continue }
+            let currentURL = URL(
+                fileURLWithPath: entry.originalPath
+            )
+            let originalURL = URL(fileURLWithPath: oldPath)
+            do {
+                try FileManager.default.moveItem(
+                    at: currentURL, to: originalURL
+                )
+                logger.info(
+                    "Reversed rename: \(currentURL.lastPathComponent) -> \(originalURL.lastPathComponent)"
+                )
+            } catch {
+                failures.append(
+                    "\(oldPath): \(error.localizedDescription)"
+                )
+            }
+        }
+
+        // Phase 1: Restore quarantined files (move entries only)
+        let moveEntries = transaction.entries.filter {
+            $0.operation == .move
+        }
+        let sorted = moveEntries.sorted { a, b in
             if a.isCompanion != b.isCompanion {
                 return !a.isCompanion // primaries first
             }
@@ -313,6 +391,7 @@ public struct MergeService: Sendable {
     // MARK: - Purge
 
     /// Permanently delete quarantined files for a transaction.
+    /// Rename entries are skipped (no quarantine file to delete).
     public func purge(
         transaction: MergeTransaction,
         logDirectory: URL? = nil
@@ -320,8 +399,12 @@ public struct MergeService: Sendable {
         guard transaction.status != .undone else {
             throw MergeError.cannotPurgeUndone(transaction.id)
         }
+        // Only delete quarantined files (move entries)
+        let moveEntries = transaction.entries.filter {
+            $0.operation == .move
+        }
         var deleted = 0
-        for entry in transaction.entries {
+        for entry in moveEntries {
             guard let trashedPath = entry.trashedPath else { continue }
             let url = URL(fileURLWithPath: trashedPath)
             if FileManager.default.fileExists(atPath: url.path) {
@@ -331,7 +414,7 @@ public struct MergeService: Sendable {
         }
 
         // Clean up empty quarantine directory
-        for entry in transaction.entries {
+        for entry in moveEntries {
             guard let trashedPath = entry.trashedPath else { continue }
             let dir = URL(fileURLWithPath: trashedPath)
                 .deletingLastPathComponent()
@@ -558,17 +641,55 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
         public let trashedPath: String?
         public let isCompanion: Bool
         public let status: EntryStatus
+        /// Discriminates move-to-quarantine vs in-place rename.
+        /// Defaults to `.move` for backward compatibility with
+        /// transaction logs that predate rename support.
+        public let operation: EntryOperation
+        /// For `.rename` entries: the path before renaming.
+        /// `originalPath` holds the post-rename path. `nil`
+        /// for `.move` entries.
+        public let renamedFrom: String?
 
         public init(
             originalPath: String,
             trashedPath: String?,
             isCompanion: Bool = false,
-            status: EntryStatus = .completed
+            status: EntryStatus = .completed,
+            operation: EntryOperation = .move,
+            renamedFrom: String? = nil
         ) {
             self.originalPath = originalPath
             self.trashedPath = trashedPath
             self.isCompanion = isCompanion
             self.status = status
+            self.operation = operation
+            self.renamedFrom = renamedFrom
+        }
+
+        // Backward-compatible decoding: old logs lack operation
+        // and renamedFrom fields.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(
+                keyedBy: CodingKeys.self
+            )
+            originalPath = try c.decode(
+                String.self, forKey: .originalPath
+            )
+            trashedPath = try c.decodeIfPresent(
+                String.self, forKey: .trashedPath
+            )
+            isCompanion = try c.decode(
+                Bool.self, forKey: .isCompanion
+            )
+            status = try c.decode(
+                EntryStatus.self, forKey: .status
+            )
+            operation = try c.decodeIfPresent(
+                EntryOperation.self, forKey: .operation
+            ) ?? .move
+            renamedFrom = try c.decodeIfPresent(
+                String.self, forKey: .renamedFrom
+            )
         }
     }
 
@@ -586,6 +707,31 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
 public enum MergeMode: String, Codable, Sendable {
     case quarantine
     case trash
+}
+
+/// Discriminates move-to-quarantine from in-place rename entries.
+public enum EntryOperation: String, Codable, Sendable {
+    /// File moved to quarantine (or trash).
+    case move
+    /// File renamed in-place (keeper or companion).
+    case rename
+}
+
+/// Request to rename a keeper (or companion) in-place after
+/// quarantine moves complete.
+public struct KeeperRenameRequest: Sendable {
+    public let from: URL
+    public let to: URL
+    public let isCompanion: Bool
+    public init(
+        from: URL,
+        to: URL,
+        isCompanion: Bool = false
+    ) {
+        self.from = from
+        self.to = to
+        self.isCompanion = isCompanion
+    }
 }
 
 public enum TransactionStatus: Sendable, Equatable {
