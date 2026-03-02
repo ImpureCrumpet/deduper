@@ -7,6 +7,8 @@ public struct GroupDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var triageBridge: TriageActionBridge
 
+    @State private var quickLookURL: URL?
+
     /// Navigation closures delegated from the list VM.
     public var onSelectNext: (() -> Void)?
     public var onSelectPrevious: (() -> Void)?
@@ -152,6 +154,15 @@ public struct GroupDetailView: View {
         .onDisappear {
             triageBridge.deactivate()
         }
+        .sheet(isPresented: Binding(
+            get: { quickLookURL != nil },
+            set: { if !$0 { quickLookURL = nil } }
+        )) {
+            if let url = quickLookURL {
+                QuickLookPreview(url: url)
+                    .frame(width: 800, height: 800)
+            }
+        }
     }
 
     /// True when the detail has members and rename is not active.
@@ -164,6 +175,9 @@ public struct GroupDetailView: View {
     /// Activates or deactivates the triage bridge.
     private func syncBridge(ready: Bool) {
         if ready {
+            let keeper = viewModel.members.first(
+                where: { $0.isKeeper && $0.fileExists }
+            )
             triageBridge.activate(
                 approve: {
                     viewModel.approve(context: modelContext)
@@ -180,6 +194,13 @@ public struct GroupDetailView: View {
                 selectPrevious: { onSelectPrevious?() },
                 selectNextUndecided: {
                     onSelectNextUndecided?()
+                },
+                quickLook: keeper.map { k in
+                    {
+                        quickLookURL = URL(
+                            fileURLWithPath: k.path
+                        )
+                    }
                 }
             )
         } else {

@@ -36,6 +36,11 @@ public final class TriageActionBridge: ObservableObject {
     public var selectPrevious: (() -> Void)?
     public var selectNextUndecided: (() -> Void)?
 
+    // MARK: - Quick Look
+    /// Opens Quick Look for the currently focused member.
+    /// Populated when a member with an existing file is selected.
+    public var quickLook: (() -> Void)?
+
     public init() {}
 
     /// Called by the detail view when review-ready state changes.
@@ -45,7 +50,8 @@ public final class TriageActionBridge: ObservableObject {
         markNotDuplicate: @escaping () -> Void,
         selectNext: @escaping () -> Void,
         selectPrevious: @escaping () -> Void,
-        selectNextUndecided: @escaping () -> Void
+        selectNextUndecided: @escaping () -> Void,
+        quickLook: (() -> Void)? = nil
     ) {
         self.approve = approve
         self.skip = skip
@@ -53,6 +59,7 @@ public final class TriageActionBridge: ObservableObject {
         self.selectNext = selectNext
         self.selectPrevious = selectPrevious
         self.selectNextUndecided = selectNextUndecided
+        self.quickLook = quickLook
         self.isActive = true
     }
 
@@ -65,5 +72,6 @@ public final class TriageActionBridge: ObservableObject {
         selectNext = nil
         selectPrevious = nil
         selectNextUndecided = nil
+        quickLook = nil
     }
 }

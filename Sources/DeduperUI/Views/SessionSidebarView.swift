@@ -20,6 +20,29 @@ public struct SessionSidebarView: View {
         ) { session in
             SessionRowView(session: session)
                 .tag(session.sessionId)
+                .contextMenu {
+                    Button(role: .destructive) {
+                        viewModel.deleteSession(
+                            session.sessionId,
+                            context: modelContext
+                        )
+                    } label: {
+                        Label(
+                            "Remove Session",
+                            systemImage: "trash"
+                        )
+                    }
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        viewModel.deleteSession(
+                            session.sessionId,
+                            context: modelContext
+                        )
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                    }
+                }
         }
         .listStyle(.sidebar)
         .overlay {

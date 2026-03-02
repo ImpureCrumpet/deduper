@@ -25,6 +25,13 @@ public struct TriageCommands: Commands {
             .keyboardShortcut(.delete, modifiers: [.command])
             .disabled(!bridge.shortcutsEnabled)
 
+            Button("Quick Look") { bridge.quickLook?() }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(
+                    !bridge.shortcutsEnabled
+                        || bridge.quickLook == nil
+                )
+
             Divider()
 
             Button("Next Group") { bridge.selectNext?() }

@@ -50,6 +50,34 @@ public final class SessionListViewModel {
         isLoading = false
     }
 
+    /// Remove a session from the SwiftData index and local session list.
+    /// Does not delete the underlying artifact or manifest files on disk.
+    public func deleteSession(
+        _ sessionId: UUID,
+        context: ModelContext
+    ) {
+        let sid = sessionId
+        let pred = #Predicate<SessionIndex> {
+            $0.sessionId == sid
+        }
+        if let match = try? context.fetch(
+            FetchDescriptor<SessionIndex>(predicate: pred)
+        ).first {
+            context.delete(match)
+            do {
+                try context.save()
+                sessions.removeAll { $0.sessionId == sessionId }
+                if selectedSessionId == sessionId {
+                    selectedSessionId = sessions.first?.sessionId
+                }
+            } catch {
+                Self.logger.error(
+                    "Failed to delete session: \(error)"
+                )
+            }
+        }
+    }
+
     /// Ensure a session's groups are materialized into GroupSummary rows.
     /// Uses freshness check: skips if `.current`, re-materializes if
     /// `.stale` or `.partial`. Uses double-buffer so old rows stay
