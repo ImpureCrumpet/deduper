@@ -1840,3 +1840,549 @@ struct MergeViewModelTests {
         #expect(vm.lastTransaction == nil)
     }
 }
+
+// MARK: - Track 4: Rename Warning Tests
+
+/// Tests for plan-time rename warning vocabulary and collision handling.
+/// These tests call `validate()` and inspect the resulting `MergePlan`
+/// for the specific warning cases introduced in Track 4.
+@Suite("MergeViewModel — Rename Warnings")
+struct MergeViewModelRenameWarningTests {
+
+    // MARK: - Helpers
+
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".deduper-rename-warn-\(UUID().uuidString)"
+            )
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        return dir
+    }
+
+    private func cleanup(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Build a minimal SwiftData scenario with one approved group.
+    /// `keeperName` and `nonKeeperName` are filenames (not paths).
+    /// Returns (container, sessionId, keeperURL, nonKeeperURL).
+    @MainActor
+    private func makeOneGroupScenario(
+        keeperName: String,
+        nonKeeperName: String,
+        dir: URL,
+        template: RenameTemplate
+    ) throws -> (ModelContainer, UUID, URL, URL) {
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let context = ModelContext(container)
+        let sessionId = UUID()
+        let runId = UUID()
+        let groupId = UUID()
+
+        // Write real files
+        let keeperURL = dir.appendingPathComponent(keeperName)
+        let nonKeeperURL = dir.appendingPathComponent(nonKeeperName)
+        FileManager.default.createFile(
+            atPath: keeperURL.path,
+            contents: Data("keeper".utf8)
+        )
+        FileManager.default.createFile(
+            atPath: nonKeeperURL.path,
+            contents: Data("dupe".utf8)
+        )
+
+        // SwiftData rows
+        let session = SessionIndex(
+            sessionId: sessionId,
+            directoryPath: dir.path,
+            startedAt: Date(),
+            totalFiles: 2,
+            mediaFiles: 2,
+            duplicateGroups: 1,
+            artifactPath: dir.appendingPathComponent("art").path,
+            manifestPath: dir.appendingPathComponent("mfst").path
+        )
+        session.currentRunId = runId
+        context.insert(session)
+
+        let summary = GroupSummary(
+            sessionId: sessionId,
+            groupIndex: 1,
+            groupId: groupId,
+            confidence: 1.0,
+            mediaTypeRaw: 1,
+            memberCount: 2,
+            suggestedKeeperPath: keeperURL.path,
+            totalSize: 100,
+            spaceSavings: 50,
+            materializationRunId: runId
+        )
+        context.insert(summary)
+
+        let keeperMember = GroupMember(
+            sessionId: sessionId,
+            groupId: groupId,
+            groupIndex: 1,
+            memberIndex: 0,
+            filePath: keeperURL.path,
+            fileName: keeperName,
+            fileSize: 6,
+            isKeeper: true,
+            materializationRunId: runId
+        )
+        context.insert(keeperMember)
+
+        let nonKeeperMember = GroupMember(
+            sessionId: sessionId,
+            groupId: groupId,
+            groupIndex: 1,
+            memberIndex: 1,
+            filePath: nonKeeperURL.path,
+            fileName: nonKeeperName,
+            fileSize: 4,
+            isKeeper: false,
+            materializationRunId: runId
+        )
+        context.insert(nonKeeperMember)
+
+        let decision = ReviewDecision(
+            sessionId: sessionId,
+            groupIndex: 1,
+            groupId: groupId,
+            decisionState: .approved
+        )
+        decision.selectedKeeperPath = keeperURL.path
+        decision.renameTemplateJSON = try JSONEncoder().encode(template)
+        context.insert(decision)
+
+        try context.save()
+        return (container, sessionId, keeperURL, nonKeeperURL)
+    }
+
+    /// Wait for phase to leave `.validating`.
+    @MainActor
+    private func waitForValidation(
+        _ vm: MergeViewModel
+    ) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if case .validating = vm.phase {
+                try? await Task.sleep(for: .milliseconds(50))
+            } else {
+                return
+            }
+        }
+    }
+
+    // MARK: - appendNumber → renameCollisionResolved
+
+    @Test("appendNumber collision produces renameCollisionResolved warning")
+    @MainActor
+    func appendNumberProducesResolvedWarning() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Target name the template would produce
+        let collider = dir.appendingPathComponent("photo_best.jpg")
+        FileManager.default.createFile(
+            atPath: collider.path,
+            contents: Data("blocker".utf8)
+        )
+
+        let template = RenameTemplate(
+            mode: .suffix,
+            value: "_best",
+            collisionPolicy: .appendNumber
+        )
+        let (container, sessionId, _, _) = try makeOneGroupScenario(
+            keeperName: "photo.jpg",
+            nonKeeperName: "photo_copy.jpg",
+            dir: dir,
+            template: template
+        )
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected .preview, got \(vm.phase)")
+            return
+        }
+
+        // Group should still be in the plan (not blocked/skipped)
+        #expect(plan.items.count == 1)
+
+        // Keeper should have a rename with resolved name (e.g. photo_best-1.jpg)
+        let item = try #require(plan.items.first)
+        let rename = try #require(item.keeperRename)
+        let resolvedName = URL(
+            fileURLWithPath: rename.targetPath
+        ).lastPathComponent
+        #expect(resolvedName != "photo_best.jpg")
+        #expect(resolvedName.hasSuffix(".jpg"))
+
+        // Warning should include renameCollisionResolved
+        let allWarnings = plan.items.flatMap(\.warnings)
+        let resolved = allWarnings.first {
+            if case .renameCollisionResolved = $0 { return true }
+            return false
+        }
+        #expect(resolved != nil)
+    }
+
+    // MARK: - skip policy → renameCollision + no rename in plan
+
+    @Test("skip collision policy produces renameCollision warning and no rename")
+    @MainActor
+    func skipCollisionPolicyProducesWarningAndNoRename() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Create collider at the target name
+        let collider = dir.appendingPathComponent("photo_best.jpg")
+        FileManager.default.createFile(
+            atPath: collider.path,
+            contents: Data("blocker".utf8)
+        )
+
+        let template = RenameTemplate(
+            mode: .suffix,
+            value: "_best",
+            collisionPolicy: .skip
+        )
+        let (container, sessionId, _, _) = try makeOneGroupScenario(
+            keeperName: "photo.jpg",
+            nonKeeperName: "photo_copy.jpg",
+            dir: dir,
+            template: template
+        )
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected .preview, got \(vm.phase)")
+            return
+        }
+
+        // Group still in plan (quarantine moves proceed)
+        #expect(plan.items.count == 1)
+
+        // No rename in plan item
+        #expect(plan.items.first?.keeperRename == nil)
+
+        // renameCollision warning present
+        let allWarnings = plan.items.flatMap(\.warnings)
+        let collision = allWarnings.first {
+            if case .renameCollision = $0 { return true }
+            return false
+        }
+        #expect(collision != nil)
+    }
+
+    // MARK: - block policy → renameBlocked + group excluded
+
+    @Test("block collision policy produces renameBlocked and excludes group")
+    @MainActor
+    func blockCollisionPolicyExcludesGroup() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Create collider at the target name
+        let collider = dir.appendingPathComponent("photo_best.jpg")
+        FileManager.default.createFile(
+            atPath: collider.path,
+            contents: Data("blocker".utf8)
+        )
+
+        let template = RenameTemplate(
+            mode: .suffix,
+            value: "_best",
+            collisionPolicy: .block
+        )
+        let (container, sessionId, _, _) = try makeOneGroupScenario(
+            keeperName: "photo.jpg",
+            nonKeeperName: "photo_copy.jpg",
+            dir: dir,
+            template: template
+        )
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected .preview, got \(vm.phase)")
+            return
+        }
+
+        // Group must NOT appear in items (excluded from merge)
+        #expect(plan.items.isEmpty)
+
+        // renameBlocked in skippedGroups
+        let blocked = plan.skippedGroups.first {
+            if case .renameBlocked = $0 { return true }
+            return false
+        }
+        #expect(blocked != nil)
+
+        // blockedGroupCount reflects this
+        #expect(plan.blockedGroupCount == 1)
+    }
+
+    // MARK: - invalid target name → renameInvalidTarget
+
+    @Test("Template producing empty name emits renameInvalidTarget")
+    @MainActor
+    func invalidTargetNameEmitsWarning() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Custom mode, value is all-whitespace.
+        // File has no extension so preview() returns the raw value.
+        // trimmed = "" → renameInvalidTarget warning fired.
+        let template = RenameTemplate(
+            mode: .custom,
+            value: "   "  // all-whitespace — trimmed → "" → invalid
+        )
+        // Use a file with no extension so preview() returns "   " (raw value)
+        let (container, sessionId, _, _) = try makeOneGroupScenario(
+            keeperName: "photo",      // no extension
+            nonKeeperName: "photo_copy",
+            dir: dir,
+            template: template
+        )
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected .preview, got \(vm.phase)")
+            return
+        }
+
+        // Group still in plan (quarantine move proceeds; rename dropped)
+        // Verify: no rename in the plan item AND/OR renameInvalidTarget present
+        let allWarnings = plan.items.flatMap(\.warnings)
+        let hasInvalidWarning = allWarnings.contains {
+            if case .renameInvalidTarget = $0 { return true }
+            return false
+        }
+        if let item = plan.items.first {
+            #expect(item.keeperRename == nil)
+            #expect(hasInvalidWarning)
+        }
+    }
+
+    // MARK: - companion collision → skip companion, not block group
+
+    @Test("Companion rename collision skips companion but keeper rename proceeds")
+    @MainActor
+    func companionCollisionSkipsCompanionNotGroup() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        // Keeper + its companion (same stem, .aae extension)
+        let keeperURL = dir.appendingPathComponent("photo.jpg")
+        let companionURL = dir.appendingPathComponent("photo.aae")
+        // The keeper resolves to "photo_best.jpg".
+        // previewCompanion(keeperFileName: "photo_best.jpg",
+        //                  companionFileName: "photo.aae")
+        // applies suffix "_best" to stem "photo_best" → "photo_best_best"
+        // so the companion target is "photo_best_best.aae".
+        // Pre-create it to force the collision.
+        let companionTargetURL = dir.appendingPathComponent(
+            "photo_best_best.aae"
+        )
+        for url in [keeperURL, companionURL, companionTargetURL] {
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: Data("data".utf8)
+            )
+        }
+
+        let nonKeeperURL = dir.appendingPathComponent("photo_copy.jpg")
+        FileManager.default.createFile(
+            atPath: nonKeeperURL.path,
+            contents: Data("dupe".utf8)
+        )
+
+        let template = RenameTemplate(
+            mode: .suffix,
+            value: "_best",
+            collisionPolicy: .skip
+        )
+
+        // Build scenario manually (companion needs to exist on disk)
+        let container = try UIPersistenceFactory.makeContainer(
+            inMemory: true
+        )
+        let context = ModelContext(container)
+        let sessionId = UUID()
+        let runId = UUID()
+        let groupId = UUID()
+
+        let session = SessionIndex(
+            sessionId: sessionId,
+            directoryPath: dir.path,
+            startedAt: Date(),
+            totalFiles: 3,
+            mediaFiles: 3,
+            duplicateGroups: 1,
+            artifactPath: dir.appendingPathComponent("art").path,
+            manifestPath: dir.appendingPathComponent("mfst").path
+        )
+        session.currentRunId = runId
+        context.insert(session)
+
+        let summary = GroupSummary(
+            sessionId: sessionId,
+            groupIndex: 1,
+            groupId: groupId,
+            confidence: 1.0,
+            mediaTypeRaw: 1,
+            memberCount: 2,
+            suggestedKeeperPath: keeperURL.path,
+            totalSize: 100,
+            spaceSavings: 50,
+            materializationRunId: runId
+        )
+        context.insert(summary)
+
+        for (i, (path, name, isKeeper)) in [
+            (keeperURL.path, "photo.jpg", true),
+            (nonKeeperURL.path, "photo_copy.jpg", false)
+        ].enumerated() {
+            let member = GroupMember(
+                sessionId: sessionId,
+                groupId: groupId,
+                groupIndex: 1,
+                memberIndex: i,
+                filePath: path,
+                fileName: name,
+                fileSize: 4,
+                isKeeper: isKeeper,
+                materializationRunId: runId
+            )
+            context.insert(member)
+        }
+
+        let decision = ReviewDecision(
+            sessionId: sessionId,
+            groupIndex: 1,
+            groupId: groupId,
+            decisionState: .approved
+        )
+        decision.selectedKeeperPath = keeperURL.path
+        decision.renameTemplateJSON = try JSONEncoder().encode(template)
+        context.insert(decision)
+        try context.save()
+
+        let vm = MergeViewModel()
+        vm.validate(sessionId: sessionId, container: container)
+        await waitForValidation(vm)
+
+        guard case .preview(let plan) = vm.phase else {
+            Issue.record("Expected .preview, got \(vm.phase)")
+            return
+        }
+
+        // Group is NOT blocked (companion collision → skip, not block)
+        #expect(plan.items.count == 1)
+        #expect(plan.blockedGroupCount == 0)
+
+        // Keeper rename IS present (the keeper itself has no collision)
+        let item = try #require(plan.items.first)
+        let rename = try #require(item.keeperRename)
+        #expect(
+            URL(fileURLWithPath: rename.targetPath)
+                .lastPathComponent == "photo_best.jpg"
+        )
+
+        // Companion rename is NOT included (collision skipped it)
+        #expect(rename.companionRenames.isEmpty)
+    }
+
+    // MARK: - MergePlan computed properties
+
+    @Test("MergePlan.blockedGroupCount counts renameBlocked warnings")
+    func mergePlanBlockedGroupCount() {
+        let skipped: [MergeValidationWarning] = [
+            .renameBlocked(
+                groupIndex: 1, path: "/a/b.jpg", targetName: "b_new.jpg"
+            ),
+            .renameBlocked(
+                groupIndex: 2, path: "/a/c.jpg", targetName: "c_new.jpg"
+            ),
+            .noKeeperDetermined(groupIndex: 3),
+        ]
+        let plan = MergePlan(
+            items: [],
+            skippedGroups: skipped,
+            missingNonKeeperCount: 0,
+            emptyReason: .allSkippedDuringValidation
+        )
+        #expect(plan.blockedGroupCount == 2)
+    }
+
+    @Test("MergePlan.plannedCompanionRenameCount sums companion renames")
+    func mergePlanPlannedCompanionRenameCount() {
+        let rename1 = KeeperRename(
+            originalPath: "/a/keep.jpg",
+            targetPath: "/a/keep_new.jpg",
+            companionRenames: [
+                .init(
+                    originalPath: "/a/keep.aae",
+                    targetPath: "/a/keep_new.aae"
+                )
+            ]
+        )
+        let rename2 = KeeperRename(
+            originalPath: "/b/other.jpg",
+            targetPath: "/b/other_new.jpg",
+            companionRenames: [
+                .init(
+                    originalPath: "/b/other.xmp",
+                    targetPath: "/b/other_new.xmp"
+                ),
+                .init(
+                    originalPath: "/b/other.thm",
+                    targetPath: "/b/other_new.thm"
+                )
+            ]
+        )
+        let items: [MergePlanItem] = [
+            MergePlanItem(
+                id: UUID(),
+                groupIndex: 1,
+                keeperPath: "/a/keep.jpg",
+                nonKeeperBundles: [],
+                warnings: [],
+                keeperRename: rename1
+            ),
+            MergePlanItem(
+                id: UUID(),
+                groupIndex: 2,
+                keeperPath: "/b/other.jpg",
+                nonKeeperBundles: [],
+                warnings: [],
+                keeperRename: rename2
+            ),
+        ]
+        let plan = MergePlan(
+            items: items,
+            skippedGroups: [],
+            missingNonKeeperCount: 0,
+            emptyReason: nil
+        )
+        #expect(plan.plannedCompanionRenameCount == 3)
+    }
+}

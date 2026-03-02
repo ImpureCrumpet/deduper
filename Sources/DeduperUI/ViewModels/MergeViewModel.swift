@@ -21,6 +21,24 @@ public enum MergeValidationWarning: Sendable, Identifiable {
     case renameCollision(
         groupIndex: Int, path: String, targetName: String
     )
+    /// Rename collision resolved via appendNumber policy.
+    case renameCollisionResolved(
+        groupIndex: Int, path: String,
+        targetName: String, resolvedName: String
+    )
+    /// Rename blocked (block policy, collision) — group excluded.
+    case renameBlocked(
+        groupIndex: Int, path: String, targetName: String
+    )
+    /// Rename target name is invalid (empty, "/", null byte, etc.).
+    case renameInvalidTarget(
+        groupIndex: Int, path: String,
+        targetName: String, reason: String
+    )
+    /// appendNumber exhausted 999 attempts without finding free name.
+    case renameCollisionExhausted(
+        groupIndex: Int, path: String, targetName: String
+    )
 
     public var id: String {
         switch self {
@@ -36,12 +54,22 @@ public enum MergeValidationWarning: Sendable, Identifiable {
             "samePhysical-\(i)-\(p)"
         case .renameCollision(let i, _, let t):
             "renameCollision-\(i)-\(t)"
+        case .renameCollisionResolved(let i, _, let t, _):
+            "renameCollisionResolved-\(i)-\(t)"
+        case .renameBlocked(let i, _, let t):
+            "renameBlocked-\(i)-\(t)"
+        case .renameInvalidTarget(let i, _, let t, _):
+            "renameInvalidTarget-\(i)-\(t)"
+        case .renameCollisionExhausted(let i, _, let t):
+            "renameCollisionExhausted-\(i)-\(t)"
         }
     }
 
     public var isSkip: Bool {
         switch self {
-        case .noKeeperDetermined, .keeperMissing: true
+        case .noKeeperDetermined, .keeperMissing,
+             .renameBlocked:
+            true
         default: false
         }
     }
@@ -68,6 +96,14 @@ public enum MergeValidationWarning: Sendable, Identifiable {
             "Group \(i): hard link / alias of keeper — move removes link, not storage — \(URL(fileURLWithPath: p).lastPathComponent)"
         case .renameCollision(let i, _, let t):
             "Group \(i): rename target '\(t)' already exists — rename skipped"
+        case .renameCollisionResolved(let i, _, let t, let r):
+            "Group \(i): rename target '\(t)' in use — resolved to '\(r)'"
+        case .renameBlocked(let i, _, let t):
+            "Group \(i): rename target '\(t)' in use — group excluded (block policy)"
+        case .renameInvalidTarget(let i, _, let t, let reason):
+            "Group \(i): rename target '\(t)' is invalid — \(reason)"
+        case .renameCollisionExhausted(let i, _, let t):
+            "Group \(i): could not find free name for '\(t)' after 999 attempts — rename skipped"
         }
     }
 }
@@ -135,6 +171,21 @@ public struct MergePlan: Sendable {
     /// Count of groups that include a keeper rename.
     public var renameCount: Int {
         items.filter { $0.keeperRename != nil }.count
+    }
+
+    /// Count of groups excluded due to rename block policy.
+    public var blockedGroupCount: Int {
+        skippedGroups.filter { w in
+            if case .renameBlocked = w { return true }
+            return false
+        }.count
+    }
+
+    /// Total companion renames planned across all groups.
+    public var plannedCompanionRenameCount: Int {
+        items.reduce(0) {
+            $0 + ($1.keeperRename?.companionRenames.count ?? 0)
+        }
     }
 }
 
@@ -1067,12 +1118,13 @@ public final class MergeViewModel {
                 warnings: &warnings,
                 skipped: &skipped
             )
-            // If block policy triggered, skip entire group
+            // If block policy triggered, skip entire group.
+            // computeKeeperRename appends .renameBlocked to skipped
+            // and returns nil — check for that explicitly.
             if keeperRename == nil
                 && group.renameTemplateJSON != nil {
-                // Check if block collision caused this
                 let wasBlocked = skipped.contains { w in
-                    if case .renameCollision(let i, _, _) = w,
+                    if case .renameBlocked(let i, _, _) = w,
                        i == group.groupIndex { return true }
                     return false
                 }
@@ -1317,6 +1369,22 @@ public final class MergeViewModel {
         )
         if trimmed.isEmpty || trimmed == "." || trimmed == ".."
             || newName.contains("/") || newName.contains("\0") {
+            let reason: String
+            if trimmed.isEmpty {
+                reason = "result is empty or whitespace-only"
+            } else if trimmed == "." || trimmed == ".." {
+                reason = "result is a reserved name"
+            } else if newName.contains("/") {
+                reason = "result contains path separator"
+            } else {
+                reason = "result contains null byte"
+            }
+            warnings.append(.renameInvalidTarget(
+                groupIndex: group.groupIndex,
+                path: group.keeperPath,
+                targetName: newName,
+                reason: reason
+            ))
             return nil
         }
 
@@ -1359,12 +1427,28 @@ public final class MergeViewModel {
         if hasCollision {
             switch template.collisionPolicy {
             case .appendNumber:
-                resolvedName = resolveCollisionName(
+                let candidate = resolveCollisionName(
                     dir: dir,
                     newName: newName,
                     reserved: reservedTargets,
                     vacated: movePaths
                 )
+                if candidate == newName {
+                    // Exhausted 999 attempts — skip rename
+                    warnings.append(.renameCollisionExhausted(
+                        groupIndex: group.groupIndex,
+                        path: group.keeperPath,
+                        targetName: newName
+                    ))
+                    return nil
+                }
+                resolvedName = candidate
+                warnings.append(.renameCollisionResolved(
+                    groupIndex: group.groupIndex,
+                    path: group.keeperPath,
+                    targetName: newName,
+                    resolvedName: resolvedName
+                ))
             case .skip:
                 warnings.append(.renameCollision(
                     groupIndex: group.groupIndex,
@@ -1373,7 +1457,7 @@ public final class MergeViewModel {
                 ))
                 return nil
             case .block:
-                skipped.append(.renameCollision(
+                skipped.append(.renameBlocked(
                     groupIndex: group.groupIndex,
                     path: group.keeperPath,
                     targetName: newName
@@ -1386,13 +1470,15 @@ public final class MergeViewModel {
         // stem matching, so companions get the same suffix
         let resolvedFileName = resolvedName
 
-        // Resolve keeper's companions for atomic rename
+        // Resolve keeper's companions for atomic rename.
+        // Option 1: companion collisions skip that companion only
+        // (not block the entire group). The keeper rename proceeds.
         let keeperCompanions = CompanionResolver()
             .resolve(for: keeperURL)
         var companionRenames: [KeeperRename.CompanionRenameEntry]
             = []
         for comp in keeperCompanions.companions {
-            // Skip companions that are scheduled to be moved
+            // Skip companions scheduled to be quarantined
             let compCanonical = canonicalize(comp.url.path)
             if movePaths.contains(compCanonical) {
                 continue
@@ -1402,9 +1488,26 @@ public final class MergeViewModel {
                 keeperFileName: resolvedFileName,
                 companionFileName: comp.url.lastPathComponent
             )
-            let compNewURL = dir.appendingPathComponent(
-                compNewName
-            )
+            let compNewURL = dir.appendingPathComponent(compNewName)
+            let compCanonicalTarget = canonicalize(compNewURL.path)
+
+            // Companion collision check (advisory, best-effort)
+            let compExistsOnDisk = FileManager.default.fileExists(
+                atPath: compNewURL.path
+            ) && !movePaths.contains(compCanonicalTarget)
+            let compHasCollision = compExistsOnDisk
+                || reservedTargets.contains(compCanonicalTarget)
+
+            if compHasCollision {
+                // Option 1: skip this companion rename, warn
+                warnings.append(.renameCollision(
+                    groupIndex: group.groupIndex,
+                    path: comp.url.path,
+                    targetName: compNewName
+                ))
+                continue
+            }
+
             companionRenames.append(.init(
                 originalPath: comp.url.path,
                 targetPath: compNewURL.path

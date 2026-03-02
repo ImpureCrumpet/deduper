@@ -104,10 +104,19 @@ public struct MergeSheet: View {
                             )
                         }
                         if plan.renameCount > 0 {
+                            let compCount =
+                                plan.plannedCompanionRenameCount
+                            let label = compCount > 0
+                                ? "\(plan.renameCount) rename\(plan.renameCount == 1 ? "" : "s") + \(compCount) companion\(compCount == 1 ? "" : "s")"
+                                : "\(plan.renameCount) rename\(plan.renameCount == 1 ? "" : "s")"
+                            Label(label, systemImage: "pencil")
+                        }
+                        if plan.blockedGroupCount > 0 {
                             Label(
-                                "\(plan.renameCount) rename\(plan.renameCount == 1 ? "" : "s")",
-                                systemImage: "pencil"
+                                "\(plan.blockedGroupCount) blocked",
+                                systemImage: "xmark.circle"
                             )
+                            .foregroundStyle(.red)
                         }
                     }
                     .font(.headline)
@@ -128,9 +137,26 @@ public struct MergeSheet: View {
 
                 // Plan items + warnings
                 List {
-                    if !plan.skippedGroups.isEmpty {
+                    let blockedGroups = plan.skippedGroups.filter {
+                        if case .renameBlocked = $0 { return true }
+                        return false
+                    }
+                    let otherSkipped = plan.skippedGroups.filter {
+                        if case .renameBlocked = $0 { return false }
+                        return true
+                    }
+
+                    if !blockedGroups.isEmpty {
+                        Section("Blocked by Rename Collision") {
+                            ForEach(blockedGroups) { warning in
+                                warningRow(warning)
+                            }
+                        }
+                    }
+
+                    if !otherSkipped.isEmpty {
                         Section("Skipped Groups") {
-                            ForEach(plan.skippedGroups) { warning in
+                            ForEach(otherSkipped) { warning in
                                 warningRow(warning)
                             }
                         }
@@ -165,9 +191,26 @@ public struct MergeSheet: View {
             if !plan.skippedGroups.isEmpty {
                 Divider()
                 List {
-                    Section("Skipped Groups") {
-                        ForEach(plan.skippedGroups) { warning in
-                            warningRow(warning)
+                    let blockedGroups = plan.skippedGroups.filter {
+                        if case .renameBlocked = $0 { return true }
+                        return false
+                    }
+                    let otherSkipped = plan.skippedGroups.filter {
+                        if case .renameBlocked = $0 { return false }
+                        return true
+                    }
+                    if !blockedGroups.isEmpty {
+                        Section("Blocked by Rename Collision") {
+                            ForEach(blockedGroups) { warning in
+                                warningRow(warning)
+                            }
+                        }
+                    }
+                    if !otherSkipped.isEmpty {
+                        Section("Skipped Groups") {
+                            ForEach(otherSkipped) { warning in
+                                warningRow(warning)
+                            }
                         }
                     }
                 }
@@ -446,30 +489,48 @@ public struct MergeSheet: View {
     private func warningRow(
         _ warning: MergeValidationWarning
     ) -> some View {
-        Label {
+        let (iconName, color): (String, Color) = {
+            switch warning {
+            case .renameCollisionResolved:
+                return ("info.circle", .blue)
+            case .renameBlocked:
+                return ("xmark.circle.fill", .red)
+            case .renameInvalidTarget,
+                 .renameCollisionExhausted:
+                return ("exclamationmark.triangle.fill", .orange)
+            default:
+                return warning.isSkip
+                    ? ("xmark.circle", .red)
+                    : ("exclamationmark.triangle", .orange)
+            }
+        }()
+        return Label {
             Text(warning.message)
                 .font(.caption)
         } icon: {
-            Image(
-                systemName: warning.isSkip
-                    ? "xmark.circle" : "exclamationmark.triangle"
-            )
-            .foregroundStyle(warning.isSkip ? .red : .orange)
+            Image(systemName: iconName)
+                .foregroundStyle(color)
         }
     }
 
     private func warningBadge(
         _ warning: MergeValidationWarning
     ) -> some View {
-        HStack(spacing: 4) {
-            Image(
-                systemName: "exclamationmark.triangle.fill"
-            )
-            .font(.caption2)
+        let (iconName, color): (String, Color) = {
+            switch warning {
+            case .renameCollisionResolved:
+                return ("info.circle", .blue)
+            default:
+                return ("exclamationmark.triangle.fill", .orange)
+            }
+        }()
+        return HStack(spacing: 4) {
+            Image(systemName: iconName)
+                .font(.caption2)
             Text(warning.message)
                 .font(.caption2)
         }
-        .foregroundStyle(.orange)
+        .foregroundStyle(color)
     }
 
     // MARK: - Button Bar
