@@ -31,6 +31,14 @@ public struct MergeService: Sendable {
             at: logDir, withIntermediateDirectories: true
         )
 
+        // Acquire single-writer lock before any filesystem mutations.
+        let lock = MergeLock(logDirectory: logDir)
+        try lock.acquire(
+            owner: "ui",
+            sessionId: sessionId ?? UUID()
+        )
+        defer { lock.release() }
+
         let txId = UUID()
         let qRoot = quarantineRoot
             ?? defaultQuarantineRoot(for: assets)
@@ -381,8 +389,24 @@ public struct MergeService: Sendable {
     /// Undo a merge by restoring files from quarantine or trash.
     /// Reverses renames first (Phase 0), then restores quarantined
     /// files with primaries before companions (Phase 1).
-    public func undo(transaction: MergeTransaction) -> [String] {
+    public func undo(
+        transaction: MergeTransaction,
+        logDirectory: URL? = nil
+    ) -> [String] {
         var failures: [String] = []
+
+        // Acquire lock — undo mutates quarantine files.
+        let logDir = logDirectory ?? defaultLogDirectory()
+        let lock = MergeLock(logDirectory: logDir)
+        do {
+            try lock.acquire(
+                owner: "ui-undo",
+                sessionId: transaction.sessionId ?? UUID()
+            )
+        } catch {
+            return [error.localizedDescription]
+        }
+        defer { lock.release() }
 
         // Phase 0: Reverse renames before restoring quarantined files.
         // Only reverse completed renames (planned-but-unexecuted are
@@ -466,6 +490,15 @@ public struct MergeService: Sendable {
         guard transaction.status != .undone else {
             throw MergeError.cannotPurgeUndone(transaction.id)
         }
+
+        // Acquire lock — purge permanently deletes quarantined files.
+        let logDir = logDirectory ?? defaultLogDirectory()
+        let lock = MergeLock(logDirectory: logDir)
+        try lock.acquire(
+            owner: "ui-purge",
+            sessionId: transaction.sessionId ?? UUID()
+        )
+        defer { lock.release() }
         // Only delete quarantined files (move entries)
         let moveEntries = transaction.entries.filter {
             $0.operation == .move
@@ -925,6 +958,8 @@ public enum MergeError: Swift.Error, LocalizedError, Sendable {
     case transactionNotFound(UUID)
     case undoFailed([String])
     case cannotPurgeUndone(UUID)
+    /// Another merge/undo/purge is already in progress.
+    case lockHeld(owner: String, pid: Int32, seconds: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -936,6 +971,10 @@ public enum MergeError: Swift.Error, LocalizedError, Sendable {
             return "Undo failed for \(reasons.count) file(s)"
         case .cannotPurgeUndone(let id):
             return "Cannot purge undone transaction: \(id)"
+        case .lockHeld(let owner, let pid, let seconds):
+            return "A merge is already in progress"
+                + " (\(owner), PID \(pid), \(seconds)s ago)."
+                + " Wait for it to finish or force-quit the other process."
         }
     }
 }

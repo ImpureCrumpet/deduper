@@ -350,7 +350,10 @@ public final class MergeViewModel {
         Task {
             // Phase A: filesystem + persisted status
             let failures = await Task.detached {
-                MergeService().undo(transaction: transaction)
+                MergeService().undo(
+                    transaction: transaction,
+                    logDirectory: logDir
+                )
             }.value
 
             guard failures.isEmpty else {
@@ -398,7 +401,10 @@ public final class MergeViewModel {
         let logDir = self.logDirectory
         Task {
             let failures = await Task.detached {
-                MergeService().undo(transaction: transaction)
+                MergeService().undo(
+                    transaction: transaction,
+                    logDirectory: logDir
+                )
             }.value
 
             await Task.detached {
