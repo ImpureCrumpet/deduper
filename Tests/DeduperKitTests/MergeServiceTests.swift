@@ -207,7 +207,9 @@ struct MergeServiceTests {
             !FileManager.default.fileExists(atPath: file.path)
         )
 
-        let failures = service.undo(transaction: transaction)
+        let failures = service.undo(
+            transaction: transaction, logDirectory: logDir
+        )
         #expect(failures.isEmpty)
         #expect(
             FileManager.default.fileExists(atPath: file.path)
@@ -695,7 +697,9 @@ struct MergeServiceTests {
         )
 
         // Undo should reverse the rename
-        let failures = service.undo(transaction: transaction)
+        let failures = service.undo(
+            transaction: transaction, logDirectory: logDir
+        )
         #expect(failures.isEmpty)
 
         // Original name restored

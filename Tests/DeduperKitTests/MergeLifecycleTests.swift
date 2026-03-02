@@ -107,7 +107,7 @@ struct MergeLifecycleTests {
         )
         #expect(!FileManager.default.fileExists(atPath: file.path))
 
-        let failures = service.undo(transaction: tx)
+        let failures = service.undo(transaction: tx, logDirectory: logDir)
         #expect(failures.isEmpty)
         #expect(FileManager.default.fileExists(atPath: file.path))
 
@@ -142,7 +142,9 @@ struct MergeLifecycleTests {
             quarantineRoot: qDir
         )
 
-        let failures = service.undo(transaction: tx)
+        let failures = service.undo(
+            transaction: tx, logDirectory: logDir
+        )
         #expect(failures.isEmpty)
         try service.markUndone(
             transaction: tx, logDirectory: logDir
@@ -153,7 +155,7 @@ struct MergeLifecycleTests {
         let undone = try #require(all.first { $0.id == tx.id })
         #expect(undone.status == .undone)
 
-        // Purge should throw
+        // Purge should throw cannotPurgeUndone (not lockHeld)
         #expect(throws: MergeError.self) {
             _ = try service.purge(
                 transaction: undone, logDirectory: logDir
@@ -180,7 +182,9 @@ struct MergeLifecycleTests {
         )
 
         // Undo
-        let failures = service.undo(transaction: tx1)
+        let failures = service.undo(
+            transaction: tx1, logDirectory: logDir
+        )
         #expect(failures.isEmpty)
         try service.markUndone(
             transaction: tx1, logDirectory: logDir
@@ -228,7 +232,7 @@ struct MergeLifecycleTests {
         )
 
         // Undo
-        _ = service.undo(transaction: tx)
+        _ = service.undo(transaction: tx, logDirectory: logDir)
         try service.markUndone(
             transaction: tx, logDirectory: logDir
         )

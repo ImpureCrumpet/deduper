@@ -112,7 +112,9 @@ struct E2EIntegrationTests {
         #expect(FileManager.default.fileExists(atPath: unique.path))
 
         // Step 6: Undo
-        let failures = merger.undo(transaction: transaction)
+        let failures = merger.undo(
+            transaction: transaction, logDirectory: mergeDir
+        )
         #expect(failures.isEmpty)
 
         // Verify restored
@@ -187,7 +189,9 @@ struct E2EIntegrationTests {
         #expect(!FileManager.default.fileExists(atPath: file2.path))
 
         // Undo
-        let failures = merger.undo(transaction: transaction)
+        let failures = merger.undo(
+            transaction: transaction, logDirectory: logDir
+        )
         #expect(failures.isEmpty)
         #expect(FileManager.default.fileExists(atPath: file1.path))
         #expect(FileManager.default.fileExists(atPath: file2.path))
