@@ -113,6 +113,31 @@ struct RenameTemplateTests {
         #expect(result == "IMG_1234_keeper.mov")
     }
 
+    // MARK: - Pathological Filenames
+
+    @Test("Replace that empties stem returns original")
+    func replaceEmptiesStem() {
+        let template = RenameTemplate(
+            mode: .replace,
+            findText: "photo",
+            replaceText: ""
+        )
+        // If stem is exactly the find text, result is empty
+        let result = template.apply(to: "photo")
+        #expect(result == "")
+    }
+
+    @Test("Custom with slash in value produces slash filename")
+    func customWithSlash() {
+        let template = RenameTemplate(
+            mode: .custom, value: "sub/dir"
+        )
+        let result = template.preview(for: "photo.jpg")
+        // The template produces it — plan-time validation must
+        // catch and reject this
+        #expect(result == "sub/dir.jpg")
+    }
+
     // MARK: - Codable
 
     @Test("RenameTemplate round-trips through JSON")

@@ -164,7 +164,8 @@ public struct MergeService: Sendable {
             } catch {
                 errors.append(.init(
                     originalPath: rename.from.path,
-                    reason: "Rename failed: \(error.localizedDescription)"
+                    reason: "Rename failed: \(error.localizedDescription)",
+                    operation: .rename
                 ))
                 logger.error(
                     "Failed to rename \(rename.from.lastPathComponent): \(error.localizedDescription)"
@@ -618,6 +619,14 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
 
     public var filesMoved: Int { entries.count }
     public var errorCount: Int { errors.count }
+    /// Move errors prevent decision transition to .merged.
+    public var moveErrorCount: Int {
+        errors.filter { $0.operation == .move }.count
+    }
+    /// Rename errors are non-fatal for decision transitions.
+    public var renameErrorCount: Int {
+        errors.filter { $0.operation == .rename }.count
+    }
 
     public init(
         id: UUID,
@@ -699,6 +708,35 @@ public struct MergeTransaction: Codable, Sendable, Identifiable {
     public struct Error: Codable, Sendable {
         public let originalPath: String
         public let reason: String
+        /// Which operation produced this error. Defaults to
+        /// `.move` for backward compatibility.
+        public let operation: EntryOperation
+
+        public init(
+            originalPath: String,
+            reason: String,
+            operation: EntryOperation = .move
+        ) {
+            self.originalPath = originalPath
+            self.reason = reason
+            self.operation = operation
+        }
+
+        // Backward-compatible decoding
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(
+                keyedBy: CodingKeys.self
+            )
+            originalPath = try c.decode(
+                String.self, forKey: .originalPath
+            )
+            reason = try c.decode(
+                String.self, forKey: .reason
+            )
+            operation = try c.decodeIfPresent(
+                EntryOperation.self, forKey: .operation
+            ) ?? .move
+        }
     }
 
     public enum EntryStatus: String, Codable, Sendable {

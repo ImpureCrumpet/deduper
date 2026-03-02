@@ -880,6 +880,53 @@ struct MergeServiceTests {
         )
     }
 
+    @Test("Rename error tagged with .rename operation")
+    func renameErrorTaggedCorrectly() throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let logDir = dir.appendingPathComponent("logs")
+        let qDir = dir.appendingPathComponent("quarantine")
+
+        // Create a file, then create the target so rename fails
+        let keeper = dir.appendingPathComponent("keeper.heic")
+        try Data("keeper".utf8).write(to: keeper)
+        let target = dir.appendingPathComponent("target.heic")
+        try Data("blocker".utf8).write(to: target)
+
+        let renames = [
+            KeeperRenameRequest(from: keeper, to: target)
+        ]
+        let transaction = try service.moveToQuarantine(
+            assets: [],
+            renames: renames,
+            logDirectory: logDir,
+            quarantineRoot: qDir
+        )
+
+        // Should have rename error, not move error
+        #expect(transaction.errorCount == 1)
+        #expect(transaction.moveErrorCount == 0)
+        #expect(transaction.renameErrorCount == 1)
+        #expect(transaction.errors[0].operation == .rename)
+    }
+
+    @Test("Move error defaults to .move operation")
+    func moveErrorDefaultsToMove() throws {
+        // Backward compat: error without operation decodes as .move
+        let json = """
+        {
+            "originalPath": "/a/b.jpg",
+            "reason": "File not found"
+        }
+        """.data(using: .utf8)!
+
+        let error = try JSONDecoder().decode(
+            MergeTransaction.Error.self, from: json
+        )
+        #expect(error.operation == .move)
+    }
+
     @Test("Rename entries in WAL planned log before execution")
     func renameInWalPlannedLog() throws {
         let dir = try makeTempDir()

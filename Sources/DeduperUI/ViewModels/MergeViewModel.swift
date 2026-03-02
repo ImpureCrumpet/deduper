@@ -296,10 +296,11 @@ public final class MergeViewModel {
                 lastTransaction = transaction
                 lastMergedGroupIds = mergedIds
 
-                // Only transition to .merged when execution
-                // fully succeeded — partial failures keep
-                // decisions as .approved so the user can retry.
-                if let container, transaction.errorCount == 0 {
+                // Transition to .merged when all quarantine moves
+                // succeeded. Rename errors are non-fatal — the
+                // non-keepers are already quarantined, so the
+                // merge is substantively complete.
+                if let container, transaction.moveErrorCount == 0 {
                     lastContainer = container
                     transitionToMerged(
                         groupIds: mergedIds,
@@ -717,6 +718,9 @@ public final class MergeViewModel {
             resolved.map { canonicalize($0.keeperPath) }
         )
         var seenMovePaths = Set<String>()
+        // Cross-group rename target reservation: prevents two
+        // groups from planning renames to the same target path.
+        var reservedRenameTargets = Set<String>()
 
         for group in resolved {
             var bundles: [AssetBundle] = []
@@ -820,6 +824,7 @@ public final class MergeViewModel {
             let keeperRename = computeKeeperRename(
                 group: group,
                 movePaths: seenMovePaths,
+                reservedTargets: &reservedRenameTargets,
                 warnings: &warnings,
                 skipped: &skipped
             )
@@ -1042,9 +1047,13 @@ public final class MergeViewModel {
     /// `movePaths`: canonical paths of all files scheduled for
     /// quarantine. Companions in this set are excluded from rename
     /// (they're about to be moved, not renamed).
+    ///
+    /// `reservedTargets`: canonical paths already claimed by
+    /// prior groups' renames in this plan. Updated on success.
     private nonisolated func computeKeeperRename(
         group: ResolvedGroup,
         movePaths: Set<String>,
+        reservedTargets: inout Set<String>,
         warnings: inout [MergeValidationWarning],
         skipped: inout [MergeValidationWarning]
     ) -> KeeperRename? {
@@ -1063,6 +1072,22 @@ public final class MergeViewModel {
         // No-op: template produces same name
         guard newName != keeperFileName else { return nil }
 
+        // Reject pathological filenames
+        let trimmed = newName.trimmingCharacters(
+            in: .whitespaces
+        )
+        if trimmed.isEmpty || trimmed == "." || trimmed == ".."
+            || newName.contains("/") || newName.contains("\0") {
+            return nil
+        }
+
+        // No-op after canonicalization
+        let targetURL = dir.appendingPathComponent(newName)
+        if canonicalize(keeperURL.path)
+            == canonicalize(targetURL.path) {
+            return nil
+        }
+
         // Protected path guard: refuse rename if source or
         // target is in a protected location
         if isProtectedPath(keeperURL) {
@@ -1072,7 +1097,6 @@ public final class MergeViewModel {
             ))
             return nil
         }
-        let targetURL = dir.appendingPathComponent(newName)
         if isProtectedPath(targetURL) {
             warnings.append(.protectedPath(
                 groupIndex: group.groupIndex,
@@ -1081,15 +1105,20 @@ public final class MergeViewModel {
             return nil
         }
 
-        // Advisory collision check
-        var resolvedName = newName
-        if FileManager.default.fileExists(
+        // Advisory collision check: filesystem + cross-group
+        let canonicalTarget = canonicalize(targetURL.path)
+        let hasCollision = FileManager.default.fileExists(
             atPath: targetURL.path
-        ) {
+        ) || reservedTargets.contains(canonicalTarget)
+
+        var resolvedName = newName
+        if hasCollision {
             switch template.collisionPolicy {
             case .appendNumber:
                 resolvedName = resolveCollisionName(
-                    dir: dir, newName: newName
+                    dir: dir,
+                    newName: newName,
+                    reserved: reservedTargets
                 )
             case .skip:
                 warnings.append(.renameCollision(
@@ -1137,17 +1166,28 @@ public final class MergeViewModel {
             ))
         }
 
+        // Reserve all targets atomically for cross-group dedup
+        let keeperTargetPath = dir.appendingPathComponent(
+            resolvedName
+        ).path
+        reservedTargets.insert(canonicalize(keeperTargetPath))
+        for comp in companionRenames {
+            reservedTargets.insert(canonicalize(comp.targetPath))
+        }
+
         return KeeperRename(
             originalPath: group.keeperPath,
-            targetPath: dir.appendingPathComponent(resolvedName)
-                .path,
+            targetPath: keeperTargetPath,
             companionRenames: companionRenames
         )
     }
 
     /// Find a non-colliding name by appending "-1", "-2", etc.
+    /// Checks both the filesystem and the cross-group reserved set.
     private nonisolated func resolveCollisionName(
-        dir: URL, newName: String
+        dir: URL,
+        newName: String,
+        reserved: Set<String>
     ) -> String {
         let ext = (newName as NSString).pathExtension
         let stem = (newName as NSString).deletingPathExtension
@@ -1159,7 +1199,9 @@ public final class MergeViewModel {
                 candidate = "\(stem)-\(i).\(ext)"
             }
             let url = dir.appendingPathComponent(candidate)
-            if !FileManager.default.fileExists(atPath: url.path) {
+            let canonical = canonicalize(url.path)
+            if !FileManager.default.fileExists(atPath: url.path)
+                && !reserved.contains(canonical) {
                 return candidate
             }
         }
