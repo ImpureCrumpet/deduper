@@ -32,6 +32,10 @@ public final class SessionIndex {
     /// Which materialization run is live (UI queries filter on this).
     public var currentRunId: UUID?
 
+    /// When true, the session is hidden from the sidebar. Discovery will
+    /// never un-hide this row — it persists across relaunches and re-scans.
+    public var isHidden: Bool
+
     public init(
         sessionId: UUID,
         directoryPath: String,
@@ -45,7 +49,8 @@ public final class SessionIndex {
         indexedAt: Date = Date(),
         artifactMtime: Date? = nil,
         materializedGroupCount: Int = 0,
-        currentRunId: UUID? = nil
+        currentRunId: UUID? = nil,
+        isHidden: Bool = false
     ) {
         self.sessionId = sessionId
         self.directoryPath = directoryPath
@@ -60,6 +65,7 @@ public final class SessionIndex {
         self.artifactMtime = artifactMtime
         self.materializedGroupCount = materializedGroupCount
         self.currentRunId = currentRunId
+        self.isHidden = isHidden
     }
 
     /// Materialization freshness state.

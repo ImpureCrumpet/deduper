@@ -98,8 +98,12 @@ public struct SessionDiscoveryService: Sendable {
             context.insert(entry)
         }
 
-        // Remove orphans (index entries whose manifests no longer exist)
-        for entry in existing where !manifestIds.contains(entry.sessionId) {
+        // Remove orphans (index entries whose manifests no longer exist on
+        // disk). Hidden rows are kept even if their manifest is gone — the
+        // user explicitly dismissed them, so we preserve the tombstone.
+        for entry in existing
+            where !manifestIds.contains(entry.sessionId) && !entry.isHidden
+        {
             context.delete(entry)
         }
 

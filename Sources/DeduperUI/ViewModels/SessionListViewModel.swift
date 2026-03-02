@@ -36,6 +36,7 @@ public final class SessionListViewModel {
         discoveryService.syncIndex(context: context)
 
         var descriptor = FetchDescriptor<SessionIndex>(
+            predicate: #Predicate { !$0.isHidden },
             sortBy: [SortDescriptor(\.startedAt, order: .reverse)]
         )
         descriptor.fetchLimit = 500
@@ -50,8 +51,9 @@ public final class SessionListViewModel {
         isLoading = false
     }
 
-    /// Remove a session from the SwiftData index and local session list.
-    /// Does not delete the underlying artifact or manifest files on disk.
+    /// Hide a session from the sidebar. Marks the SessionIndex row as
+    /// hidden so it survives relaunch and re-scan without reappearing.
+    /// The underlying manifest and artifact files are not deleted.
     public func deleteSession(
         _ sessionId: UUID,
         context: ModelContext
@@ -63,7 +65,7 @@ public final class SessionListViewModel {
         if let match = try? context.fetch(
             FetchDescriptor<SessionIndex>(predicate: pred)
         ).first {
-            context.delete(match)
+            match.isHidden = true
             do {
                 try context.save()
                 sessions.removeAll { $0.sessionId == sessionId }
@@ -72,7 +74,7 @@ public final class SessionListViewModel {
                 }
             } catch {
                 Self.logger.error(
-                    "Failed to delete session: \(error)"
+                    "Failed to hide session: \(error)"
                 )
             }
         }
