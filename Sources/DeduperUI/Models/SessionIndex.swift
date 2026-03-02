@@ -34,7 +34,9 @@ public final class SessionIndex {
 
     /// When true, the session is hidden from the sidebar. Discovery will
     /// never un-hide this row — it persists across relaunches and re-scans.
-    public var isHidden: Bool
+    /// Property-level default (= false) is required for lightweight migration:
+    /// CoreData uses it to populate the column in existing rows.
+    public var isHidden: Bool = false
 
     public init(
         sessionId: UUID,
